@@ -1,0 +1,20 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model MpcShare {
+  publicKey   String    @id @map("public_key") @db.VarChar(130)
+  keyShare    String    @map("key_share") @db.Text
+  userId      String?   @map("user_id") @db.Uuid
+  username    String?   @map("username") @db.VarChar(50)
+  email       String?   @map("email") @db.VarChar(100)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  assignedAt  DateTime? @map("assigned_at")
+
+  @@map("mpc_shares")
+}

@@ -1,0 +1,17 @@
+{
+    "name": "mpc-infra-scripts",
+    "version": "1.0.0",
+    "description": "TypeScript orchestration utilities for isolated MPC clusters",
+    "main": "index.js",
+    "scripts": {
+      "db:migrate": "./migrate_nodes.sh"
+    },
+    "dependencies": {
+      "@prisma/client": "^5.16.0"
+    },
+    "devDependencies": {
+      "@types/node": "^20.14.9",
+      "prisma": "^5.16.0",
+      "typescript": "^5.5.2"
+    }
+  }
