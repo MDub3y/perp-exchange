@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  app-db:
+    image: postgres:16-alpine
+    container_name: perp_app_db
+    environment: 
+    POSTGRES_USER: exchange-admin
+    POSTGRES_PASSWORD: exchange_secure_password
+    POSTGRES_DB: exchange_v1
+  ports:
+    - "5432:5432"
+  volumes:
+    - pg_app_data:/var/lib/postgresql/data
+
+volumes:
+  pg_app_data:
