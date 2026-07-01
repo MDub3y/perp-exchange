@@ -1,4 +1,4 @@
-use actix_web::{HttpResponse, Responder, web};
+use actix_web::{HttpResponse, Responder, delete, get, post, web};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -27,19 +27,30 @@ pub struct MarketPath {
     pub market_id: String,
 }
 
+#[post("/order")]
 pub async fn create_order(payload: web::Json<OrderPayload>) -> impl Responder {
     HttpResponse::Ok().json("Order placed successfully")
 }
 
+#[delete("/order/{order_id}")]
 pub async fn cancel_order(path: web::Path<String>) -> impl Responder {
     let order_id = path.into_inner();
     HttpResponse::Ok().json(format!("Order {} cancelled", order_id))
 }
 
+#[get("/orders/open/{market_id}")]
 pub async fn get_open_orders(path: web::Path<MarketPath>) -> impl Responder {
     HttpResponse::Ok().json(format!("Open orders for market {}", path.market_id))
 }
 
+#[get("/orders/{market_id}")]
 pub async fn get_order_history(path: web::Path<MarketPath>) -> impl Responder {
     HttpResponse::Ok().json(format!("All orders for market {}", path.market_id))
+}
+
+pub fn config(cfg: &mut web::ServiceConfig) {
+    cfg.service(create_order)
+        .service(cancel_order)
+        .service(get_open_orders)
+        .service(get_order_history);
 }
