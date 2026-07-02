@@ -1,23 +1,39 @@
+use std::env;
+
 use actix_web::{HttpResponse, Responder, post, web};
 use argon2::{
-    Argon2, PasswordHasher,
+    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
     password_hash::{SaltString, rand_core::OsRng},
 };
+use chrono::{Duration, Utc};
+use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
-
-#[derive(Deserialize)]
-pub struct AuthPayload {
-    pub wallet_address: String,
-    pub signature: String,
-}
 
 #[derive(Deserialize)]
 pub struct SignupPayload {
     pub username: String,
     pub email: String,
     pub password: String,
+}
+
+#[derive(Deserialize)]
+pub struct SigninPayload {
+    pub username_or_email: String,
+    pub password: String,
+}
+
+#[derive(Serialize)]
+pub struct AuthTokenResponse {
+    pub token: String,
+    pub token_type: String,
+}
+
+#[derive(Serialize)]
+pub struct JwtClaims {
+    pub sub: String,
+    pub username: String,
+    pub exp: i64,
 }
 
 #[derive(Serialize)]
@@ -116,42 +132,27 @@ pub async fn signup(
     }
 
     let node_urls = vec![
-        (
-            "Node 1",
-            "postgres://mpc_operator_1:supersecurepasswordnode1@127.0.0.1:6431/postgres",
-        ),
-        (
-            "Node 2",
-            "postgres://mpc_operator_2:supersecurepasswordnode2@127.0.0.1:6432/postgres",
-        ),
-        (
-            "Node 3",
-            "postgres://mpc_operator_3:supersecurepasswordnode3@127.0.0.1:6433/postgres",
-        ),
+        ("Node 1", env::var("NODE_1_DB_URL").unwrap_or_default()),
+        ("Node 2", env::var("NODE_2_DB_URL").unwrap_or_default()),
+        ("Node 3", env::var("NODE_3_DB_URL").unwrap_or_default()),
     ];
 
     for (node_name, url) in node_urls {
-        match sqlx::PgPool::connect(url).await {
-            Ok(pool) => {
-                let res = sqlx::query(
-                    "UPDATE mpc_shares SET user_id = $1, username = $2, email = $3, assigned_at = NOW() WHERE public_key = $4"
-                )
-                .bind(&user_id)
-                .bind(&payload.username)
-                .bind(&payload.email)
-                .bind(&public_key)
-                .execute(&pool)
-                .await;
-
-                if res.is_ok() {
-                    println!("✨ Successfully synchronized metadata to {}", node_name);
-                } else {
-                    eprintln!("⚠️ Failed to execute query on {}", node_name);
-                }
-            }
-            Err(e) => {
-                eprintln!("❌ Network propagation failed for {}: {}", node_name, e);
-            }
+        if url.is_empty() {
+            eprintln!("Environment configuration missing for target {}", node_name);
+            continue;
+        }
+        if let Ok(pool) = sqlx::PgPool::connect(&url).await {
+            let _ = sqlx::query(
+                "UPDATE mpc_shares SET user_id = $1, username = $2, email = $3, assigned_at = NOW() WHERE public_key = $4"
+            )
+            .bind(&user_id)
+            .bind(&payload.username)
+            .bind(&payload.email)
+            .bind(&public_key)
+            .execute(&pool)
+            .await;
+            println!("Successfully synchronized metadata to {}", node_name);
         }
     }
 
@@ -163,9 +164,66 @@ pub async fn signup(
 }
 
 #[post("/signin")]
-pub async fn signin(payload: web::Json<AuthPayload>) -> impl Responder {
-    // TODO: validate signature and issue JWT
-    HttpResponse::Ok().json("User authenticated")
+pub async fn signin(
+    payload: web::Json<SigninPayload>,
+    app_state: web::Data<crate::state::AppState>,
+) -> impl Responder {
+    let user_record = sqlx::query!(
+        "SELECT id, username, password_hash FROM users WHERE username = $1 OR email = $1",
+        payload.username_or_email
+    )
+    .fetch_optional(&app_state.db)
+    .await;
+
+    let user = match user_record {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return HttpResponse::Unauthorized().json("Invalid identifier credentials provided");
+        }
+        Err(_) => return HttpResponse::InternalServerError().json("Database auth parsing failure"),
+    };
+
+    let parsed_hash = match PasswordHash::new(&user.password_hash) {
+        Ok(h) => h,
+        Err(_) => {
+            return HttpResponse::InternalServerError()
+                .json("Error loading cryptographic credentials representation");
+        }
+    };
+
+    if Argon2::default()
+        .verify_password(payload.password.as_bytes(), &parsed_hash)
+        .is_err()
+    {
+        return HttpResponse::Unauthorized().json("Invalid password entry credentials");
+    }
+
+    let jwt_secret = env::var("JWT_SECRET")
+        .unwrap_or_else(|_| "default_fallback_secret_key_string_matrix_987".to_string());
+    let expiration = Utc::now() + Duration::hours(24);
+
+    let claims = JwtClaims {
+        sub: user.id.to_string(),
+        username: user.username,
+        exp: expiration.timestamp(),
+    };
+
+    let token = match encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(jwt_secret.as_bytes()),
+    ) {
+        Ok(t) => t,
+        Err(_) => {
+            return HttpResponse::InternalServerError()
+                .json("Failed to synthesize signed auth string");
+        }
+    };
+
+    HttpResponse::Ok().json(AuthTokenResponse {
+        token,
+        token_type: "Bearer".to_string(),
+    })
 }
 
 pub fn config(cfg: &mut web::ServiceConfig) {
