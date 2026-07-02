@@ -1,7 +1,6 @@
-use std::env;
-
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, web};
 use sqlx::postgres::PgPoolOptions;
+use std::env;
 
 pub mod handlers;
 pub mod state;
@@ -12,7 +11,7 @@ async fn ping() -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    /* dotenvy::dotenv().ok(); */
+    dotenvy::dotenv().ok();
     let database_url = env::var("DATABASE_URL").unwrap();
 
     let db_pool = PgPoolOptions::new()
