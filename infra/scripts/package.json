@@ -4,14 +4,19 @@
     "description": "TypeScript orchestration utilities for isolated MPC clusters",
     "main": "index.js",
     "scripts": {
-      "db:migrate": "./migrate_nodes.sh"
+        "db:migrate": "./migrate_nodes.sh",
+        "frost:generate": "ts-node generate_shares.ts"
     },
     "dependencies": {
-      "@prisma/client": "^5.16.0"
+        "@noble/curves": "^2.2.0",
+        "@prisma/client": "^5.16.0",
+        "pg": "^8.22.0"
     },
     "devDependencies": {
-      "@types/node": "^20.14.9",
-      "prisma": "^5.16.0",
-      "typescript": "^5.5.2"
+        "@types/node": "^20.14.9",
+        "@types/pg": "^8.20.0",
+        "prisma": "^5.16.0",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.5.2"
     }
-  }
+}
