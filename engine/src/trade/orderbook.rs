@@ -125,34 +125,39 @@ impl Orderbook {
         let mut taker_order = payload.order;
 
         match payload.order_type {
-            OrderType::LIMIT => {
-                match payload.order_side {
-                    // TODO: matching logic if awailable
-                    OrderSide::BUY => self
-                        .bids
-                        .entry(Reverse(payload.order.price))
-                        .or_default()
-                        .push_back(payload.order),
-                    OrderSide::SELL => self
-                        .asks
-                        .entry(payload.order.price)
-                        .or_default()
-                        .push_back(payload.order),
-                }
-            }
-            OrderType::MARKET => {
-                match payload.order_side {
-                    OrderSide::BUY => {
-                        // walk the asks side and fill
-                    }
-                    OrderSide::SELL => {
-                        // walk the bids side and fill
+            OrderType::LIMIT => match payload.order_side {
+                OrderSide::BUY => {
+                    self.match_against_asks(&mut taker_order, &mut result)?;
+
+                    if taker_order.quantity > Decimal::ZERO {
+                        self.order_price_map
+                            .insert(taker_order.order_id, taker_order.price);
+                        self.bids
+                            .entry(Reverse(taker_order.price))
+                            .or_default()
+                            .push_back(taker_order);
                     }
                 }
-            }
+                OrderSide::SELL => {
+                    self.match_against_bids(&mut taker_order, &mut result)?;
+
+                    if taker_order.quantity > Decimal::ZERO {
+                        self.order_price_map
+                            .insert(taker_order.order_id, taker_order.price);
+                        self.asks
+                            .entry(taker_order.price)
+                            .or_default()
+                            .push_back(taker_order);
+                    }
+                }
+            },
+            OrderType::MARKET => match payload.order_side {
+                OrderSide::BUY => self.match_against_asks(&mut taker_order, &mut result)?,
+                OrderSide::SELL => self.match_against_bids(&mut taker_order, &mut result)?,
+            },
         }
 
-        Ok(())
+        Ok(result)
     }
 
     pub fn match_against_asks(
@@ -161,7 +166,7 @@ impl Orderbook {
         result: &mut ProcessOrderResult,
     ) -> Result<(), String> {
         while taker_order.quantity > Decimal::ZERO && !self.asks.is_empty() {
-            let mut best_ask_price = *self.asks.keys().next.unwrap();
+            let mut best_ask_price = *self.asks.keys().next().unwrap();
 
             if taker_order.price < best_ask_price && taker_order.price != Decimal::ZERO {
                 break;
