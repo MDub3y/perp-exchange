@@ -253,12 +253,26 @@ impl Orderbook {
         Ok(())
     }
 
-    pub fn get_depth() -> Result<(), String> {
-        // asks + bids
-        Ok(())
+    pub fn get_depth(&self) -> OrderBookDepth {
+        let mut depth = OrderBookDepth {
+            bids: Vec::new(),
+            asks: Vec::new(),
+        };
+
+        for (price_key, queue) in &self.bids {
+            let total_volume: Decimal = queue.iter().map(|o| o.quantity).sum();
+            depth.bids.push((price_key.0, total_volume));
+        }
+
+        for (price, queue) in &self.asks {
+            let total_volume: Decimal = queue.iter().map(|o| o.quantity).sum();
+            depth.asks.push((*price, total_volume));
+        }
+
+        depth
     }
 
-    pub fn cancel_order() -> Result<(), String> {
+    pub fn cancel_order(&mut self, order_id: Uuid) -> Result<(), String> {
         Ok(())
     }
 
