@@ -272,8 +272,30 @@ impl Orderbook {
         depth
     }
 
-    pub fn cancel_order(&mut self, order_id: Uuid) -> Result<(), String> {
-        Ok(())
+    pub fn cancel_order(&mut self, order_id: Uuid) -> Result<bool, String> {
+        if let Some(price) = self.order_price_map.remove(&order_id) {
+            if let Some(queue) = self.asks.get_mut(&price) {
+                if let Some(pos) = queue.iter().position(|o| o.order_id == order_id) {
+                    queue.remove(pos);
+                    if queue.is_empty() {
+                        self.asks.remove(&price);
+                    }
+                    return Ok(true);
+                }
+            }
+
+            let bid_key = Reverse(price);
+            if let Some(queue) = self.bids.get_mut(&bid_key) {
+                if let Some(pos) = queue.iter().position(|o| o.order_id == order_id) {
+                    queue.remove(pos);
+                    if queue.is_empty() {
+                        self.bids.remove(&bid_key);
+                    }
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     pub fn cancel_all_orders() -> Result<(), String> {
