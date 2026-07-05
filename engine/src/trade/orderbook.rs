@@ -200,7 +200,51 @@ impl Orderbook {
         Ok(())
     }
 
-    pub fn match_against_bids() -> Result<(), String> {
+    pub fn match_against_bids(
+        &mut self,
+        taker_order: &mut Order,
+        result: &mut ProcessOrderResult,
+    ) -> Result<(), String> {
+        while taker_order.quantity > Decimal::ZERO && !self.bids.is_empty() {
+            // Peek at the highest bid price level
+            let best_bid_key = *self.bids.keys().next().unwrap();
+            let best_bid_price = best_bid_key.0;
+
+            // Limit Order boundary protection: stop execution if bid price is lower than our sell limit
+            if taker_order.price > best_bid_price && taker_order.price != Decimal::ZERO {
+                break;
+            }
+
+            if let Some(queue) = self.bids.get_mut(&best_bid_key) {
+                while taker_order.quantity > Decimal::ZERO && !queue.is_empty() {
+                    let mut maker_order = queue.pop_front().unwrap();
+                    let match_quantity = taker_order.quantity.min(maker_order.quantity);
+
+                    taker_order.quantity -= match_quantity;
+                    maker_order.quantity -= match_quantity;
+                    result.executed_quantity += match_quantity;
+
+                    result.fills.push(Fill {
+                        price: best_bid_price,
+                        quantity: match_quantity,
+                        taker_order_id: taker_order.order_id,
+                        taker_user_id: taker_order.user_id,
+                        maker_order_id: maker_order.order_id,
+                        maker_user_id: maker_order.user_id,
+                    });
+
+                    if maker_order.quantity > Decimal::ZERO {
+                        queue.push_front(maker_order);
+                    } else {
+                        self.order_price_map.remove(&maker_order.order_id);
+                    }
+                }
+
+                if queue.is_empty() {
+                    self.bids.remove(&best_bid_key);
+                }
+            }
+        }
         Ok(())
     }
 
