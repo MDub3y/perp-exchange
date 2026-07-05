@@ -298,7 +298,10 @@ impl Orderbook {
         Ok(false)
     }
 
-    pub fn cancel_all_orders() -> Result<(), String> {
+    pub fn cancel_all_orders(&mut self) -> Result<(), String> {
+        self.bids.clear();
+        self.asks.clear();
+        self.order_price_map.clear();
         Ok(())
     }
 
