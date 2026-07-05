@@ -1,6 +1,6 @@
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
 };
 
 use chrono::Utc;
@@ -31,13 +31,13 @@ pub enum OrderStatus {
 }
 
 pub struct Order {
+    pub user_id: Uuid,
     pub order_id: Uuid,
     pub price: Decimal,
     pub quantity: Decimal,
 }
 
 pub struct OrderPayload {
-    pub user_id: Uuid,
     pub market: Market,
     pub order: Order,
     pub order_side: OrderSide,
@@ -58,9 +58,9 @@ impl OrderPayload {
         let timestamp = Utc::now().timestamp_millis();
 
         Self {
-            user_id,
             market,
             order: Order {
+                user_id,
                 order_id,
                 price,
                 quantity,
@@ -75,9 +75,10 @@ impl OrderPayload {
 pub struct Fill {
     pub price: Decimal,
     pub quantity: Decimal,
-    pub user_id: Uuid,
-    pub order_id: Uuid,
-    pub matching_user_id: Uuid,
+    pub taker_user_id: Uuid,
+    pub taker_order_id: Uuid,
+    pub maker_user_id: Uuid,
+    pub maker_order_id: Uuid,
 }
 
 pub struct ProcessOrderResult {
@@ -85,25 +86,44 @@ pub struct ProcessOrderResult {
     pub executed_quantity: Decimal,
 }
 
+pub struct OrderBookDepth {
+    pub bids: Vec<(Decimal, Decimal)>,
+    pub asks: Vec<(Decimal, Decimal)>,
+}
+
 pub struct Orderbook {
     bids: BTreeMap<Reverse<Decimal>, VecDeque<Order>>,
     asks: BTreeMap<Decimal, VecDeque<Order>>,
+    order_price_map: HashMap<Uuid, Decimal>,
     market: Market,
 }
 
 impl Orderbook {
     pub fn new(market: Market) -> Self {
-        let mut bids = BTreeMap::new();
-        let mut asks = BTreeMap::new();
-
-        Self { bids, asks, market }
+        Self {
+            bids: BTreeMap::new(),
+            asks: BTreeMap::new(),
+            order_price_map: HashMap::new(),
+            market,
+        }
     }
 
     pub fn get_bids(&self) -> &BTreeMap<Reverse<Decimal>, VecDeque<Order>> {
         &self.bids
     }
 
-    pub fn process_order(&mut self, payload: OrderPayload) -> Result<(), String> {
+    pub fn get_asks(&self) -> &BTreeMap<Decimal, VecDeque<Order>> {
+        &self.asks
+    }
+
+    pub fn process_order(&mut self, payload: OrderPayload) -> Result<ProcessOrderResult, String> {
+        let mut result = ProcessOrderResult {
+            fills: Vec::new(),
+            executed_quantity: Decimal::ZERO,
+        };
+
+        let mut taker_order = payload.order;
+
         match payload.order_type {
             OrderType::LIMIT => {
                 match payload.order_side {
@@ -135,11 +155,52 @@ impl Orderbook {
         Ok(())
     }
 
-    pub fn match_asks() -> Result<(), String> {
+    pub fn match_against_asks(
+        &mut self,
+        taker_order: &mut Order,
+        result: &mut ProcessOrderResult,
+    ) -> Result<(), String> {
+        while taker_order.quantity > Decimal::ZERO && !self.asks.is_empty() {
+            let mut best_ask_price = *self.asks.keys().next.unwrap();
+
+            if taker_order.price < best_ask_price && taker_order.price != Decimal::ZERO {
+                break;
+            }
+
+            if let Some(queue) = self.asks.get_mut(&best_ask_price) {
+                while taker_order.quantity > Decimal::ZERO && !queue.is_empty() {
+                    let mut maker_order = queue.pop_front().unwrap();
+                    let match_quantity = taker_order.quantity.min(maker_order.quantity);
+
+                    taker_order.quantity -= match_quantity;
+                    maker_order.quantity -= match_quantity;
+                    result.executed_quantity += match_quantity;
+
+                    result.fills.push(Fill {
+                        price: best_ask_price,
+                        quantity: match_quantity,
+                        taker_order_id: taker_order.order_id,
+                        taker_user_id: taker_order.user_id,
+                        maker_order_id: maker_order.order_id,
+                        maker_user_id: maker_order.user_id,
+                    });
+
+                    if maker_order.quantity > Decimal::ZERO {
+                        queue.push_front(maker_order);
+                    } else {
+                        self.order_price_map.remove(&maker_order.order_id);
+                    }
+                }
+
+                if queue.is_empty() {
+                    self.asks.remove(&best_ask_price);
+                }
+            }
+        }
         Ok(())
     }
 
-    pub fn match_bids() -> Result<(), String> {
+    pub fn match_against_bids() -> Result<(), String> {
         Ok(())
     }
 
