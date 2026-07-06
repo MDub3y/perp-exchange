@@ -98,4 +98,8 @@ impl RedisManager {
             .await?;
         Ok(())
     }
+
+    pub async fn setup_consumer_group(&self, stream: &str, group: &str) {
+        let _: Result<(), Error> = self.client.xgroup_create(stream, group, "0", true).await;
+    }
 }
