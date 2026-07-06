@@ -13,5 +13,12 @@ services:
     volumes:
       - pg_app_data:/var/lib/postgresql/data
 
+  exchange-redis: 
+    image: redis:7.2-alpine
+    container_name: perp_app_redis
+    command: redis-server --appendonly yes --save ""
+    ports: 
+      - "6379:6379"
+      
 volumes:
   pg_app_data:
