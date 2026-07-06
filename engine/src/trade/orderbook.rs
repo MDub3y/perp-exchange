@@ -7,6 +7,7 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
+#[derive(Eq, Hash, PartialEq, Debug)]
 pub enum Market {
     SOL_PERP,
     BTC_PERP,
