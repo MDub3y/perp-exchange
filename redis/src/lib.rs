@@ -145,4 +145,33 @@ impl RedisManager {
         let _: i64 = self.client.xack(stream, group, id).await?;
         Ok(())
     }
+
+    pub async fn publish_market_update(
+        &self,
+        market: Market,
+        feed_type: &str,
+        payload: &str,
+    ) -> Result<(), Error> {
+        let channel = format!("market:{:?}:{}", market, feed_type);
+        let _: () = self.client.publish(channel, payload).await?;
+        Ok(())
+    }
+
+    pub async fn publish_user_update(&self, user_id: &str, payload: &str) -> Result<(), Error> {
+        let channel = format!("user:{}:updates", user_id);
+        let _: () = self.client.publish(channel, payload).await?;
+        Ok(())
+    }
+
+    pub async fn enqueue_persistence_log(
+        &self,
+        stream: &str,
+        trade_payload: &str,
+    ) -> Result<(), Error> {
+        let _: String = self
+            .client
+            .xadd(stream, false, None, "*", ("trade_event", trade_payload))
+            .await?;
+        Ok(())
+    }
 }
