@@ -102,4 +102,37 @@ impl RedisManager {
     pub async fn setup_consumer_group(&self, stream: &str, group: &str) {
         let _: Result<(), Error> = self.client.xgroup_create(stream, group, "0", true).await;
     }
+
+    pub async fn fetch_next_delivery(
+        &self,
+        stream: &str,
+        group: &str,
+        consumer: &str,
+    ) -> Result<Option<(String, String)>, Error> {
+        let response: Value = self
+            .client
+            .xreadgroup(group, consumer, Some(1), None, false, stream, ">")
+            .await?;
+
+        if response.is_null() {
+            return Ok(None);
+        }
+
+        if let Value::Array(stream_list) = response {
+            if let Some(Value::Array(stream_entry)) = stream_list.get(0) {
+                if let Some(Value::Array(entries)) = stream_entry.get(1) {
+                    if let Some(Value::Array(entry)) = entries.get(0) {
+                        let id = entry.get(0).and_then(|v| v.as_string()).unwrap_or_default();
+                        if let Some(Value::Array(fields)) = entry.get(1) {
+                            if let Some(raw_json) = fields.get(1).and_then(|v| v.as_string()) {
+                                return Ok(Some((id, raw_json)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
 }
