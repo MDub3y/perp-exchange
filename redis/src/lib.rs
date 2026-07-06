@@ -135,4 +135,14 @@ impl RedisManager {
 
         Ok(None)
     }
+
+    pub async fn acknowledge_processes(
+        &self,
+        stream: &str,
+        group: &str,
+        id: &str,
+    ) -> Result<(), Error> {
+        let _: i64 = self.client.xack(stream, group, id).await?;
+        Ok(())
+    }
 }
