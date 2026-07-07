@@ -1,8 +1,8 @@
 [workspace]
 members = [
     "backend",
-    "engine", "redis",
-    
+    "engine",
+    "redis",
 ]
 resolver = "2"
 

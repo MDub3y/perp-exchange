@@ -111,7 +111,7 @@ impl RedisManager {
     ) -> Result<Option<(String, String)>, Error> {
         let response: Value = self
             .client
-            .xreadgroup(group, consumer, Some(1), None, false, stream, ">")
+            .xreadgroup(group, consumer, Some(1), None, false, ">", stream)
             .await?;
 
         if response.is_null() {
@@ -146,6 +146,7 @@ impl RedisManager {
         Ok(())
     }
 
+    // pub/sub handles
     pub async fn publish_market_update(
         &self,
         market: Market,
@@ -163,6 +164,7 @@ impl RedisManager {
         Ok(())
     }
 
+    // persistence dump
     pub async fn enqueue_persistence_log(
         &self,
         stream: &str,
