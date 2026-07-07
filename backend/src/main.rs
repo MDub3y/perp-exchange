@@ -21,11 +21,16 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to establish database connection pool");
     println!("Database connection extablished!");
 
+    let redis_manager = redis::RedisManager::new()
+        .await
+        .expect("Failed to initialize system message queue");
     let app_state = web::Data::new(state::AppState::new(db_pool));
+    let shared_redis = web::Data::new(redis_manager);
 
     HttpServer::new(move || {
         App::new()
             .app_data(app_state.clone())
+            .app_data(shared_redis.clone())
             .route("/ping", web::get().to(ping))
             .service(
                 web::scope("/api/v1")

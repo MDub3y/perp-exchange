@@ -23,7 +23,7 @@ struct Claims {
     sub: String,
 }
 
-fn extract_user_id(req: &HttpRequest) -> Result<Uuid, &'static str> {
+pub fn extract_user_id(req: &HttpRequest) -> Result<Uuid, &'static str> {
     let auth_header = req
         .headers()
         .get("Authorization")

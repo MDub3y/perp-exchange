@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-redis = { path = "../redis"}
+redis = { path = "../redis" }
+utils = { path = "../utils" }
 actix-web = { workspace = true}
 tokio = { workspace = true}
 serde = { workspace = true}
