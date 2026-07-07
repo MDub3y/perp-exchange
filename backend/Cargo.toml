@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+redis = { path = "../redis"}
 actix-web = { workspace = true}
 tokio = { workspace = true}
 serde = { workspace = true}
@@ -15,3 +16,4 @@ dotenvy = { workspace = true}
 argon2 = { workspace = true}
 jsonwebtoken = { workspace = true}
 bigdecimal = { workspace = true}
+rust_decimal ={ workspace = true}

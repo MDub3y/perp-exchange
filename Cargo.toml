@@ -3,6 +3,7 @@ members = [
     "backend",
     "engine",
     "redis",
+    "utils",
 ]
 resolver = "2"
 
