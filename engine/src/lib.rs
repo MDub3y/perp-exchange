@@ -9,9 +9,7 @@ pub mod trade;
 use trade::orderbook::Orderbook;
 
 use redis::RedisManager;
-use utils::{
-    Fill, Market, Order, OrderRequests, OrderSide, OrderType, ProcessOrderResult, UserBalance,
-};
+use utils::{Fill, Market, Order, OrderRequests, OrderSide, OrderType, UserBalance};
 
 const INGESTION_STREAM: &str = "exchange:ingestion:stream";
 const PERSISTENCE_STREAM: &str = "exchange:persistence:stream";
