@@ -1,89 +1,275 @@
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
-use std::{cmp::Reverse, collections::HashMap};
+use std::cmp::Reverse;
+use std::collections::HashMap;
+use std::time::Duration;
+use tokio::time::sleep;
 use uuid::Uuid;
 
-use crate::trade::*;
-
 mod trade;
+use trade::orderbook::Orderbook;
+
+use redis::RedisManager;
+use utils::{
+    Fill, Market, Order, OrderRequests, OrderSide, OrderType, ProcessOrderResult, UserBalance,
+};
+
+const INGESTION_STREAM: &str = "exchange:ingestion:stream";
+const PERSISTENCE_STREAM: &str = "exchange:persistence:stream";
+const CONSUMER_GROUP: &str = "engine:matching:group";
+const ENGINE_IDENTITY: &str = "matching_engine_primary_node";
 
 pub struct ExecuteEngine {
     pub orderbooks: HashMap<Market, Orderbook>,
+    pub user_wallets: HashMap<Uuid, UserBalance>,
+    pub redis: RedisManager,
 }
 
 impl ExecuteEngine {
-    pub fn new() -> Self {
+    pub async fn new(redis: RedisManager) -> Self {
         let mut orderbooks = HashMap::new();
-
         orderbooks.insert(Market::SOL_PERP, Orderbook::new(Market::SOL_PERP));
         orderbooks.insert(Market::BTC_PERP, Orderbook::new(Market::BTC_PERP));
         orderbooks.insert(Market::ETH_PERP, Orderbook::new(Market::ETH_PERP));
 
-        Self { orderbooks }
+        redis
+            .setup_consumer_group(INGESTION_STREAM, CONSUMER_GROUP)
+            .await;
+
+        let mut instance = Self {
+            orderbooks,
+            user_wallets: HashMap::new(),
+            redis,
+        };
+
+        instance.seed_sandbox_balances();
+        instance
     }
 
-    pub fn execute_transaction(&mut self, payload: OrderPayload) {
-        let market_target = &payload.market;
+    fn seed_sandbox_balances(&mut self) {
+        // Seed predictable demo keys matching test scripts
+        let user_1 = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let user_2 = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
 
-        if let Some(book) = self.orderbooks.get_mut(&market_target) {
-            println!(
-                "[ENGINE] Route order {} to market {:?}",
-                payload.order.order_id, market_target
-            );
+        self.user_wallets.insert(
+            user_1,
+            UserBalance {
+                available_balance: Decimal::new(100000, 0),
+                locked_balance: Decimal::ZERO,
+            },
+        );
+        self.user_wallets.insert(
+            user_2,
+            UserBalance {
+                available_balance: Decimal::new(50000, 0),
+                locked_balance: Decimal::ZERO,
+            },
+        );
+    }
 
-            match book.process_order(payload) {
-                Ok(result) => {
-                    println!(
-                        "[ENGINE EXECUTION COMPLETE] Cleared {} units",
-                        result.executed_quantity
-                    );
-                    for fill in result.fills {
+    pub async fn start_polling_loop(&mut self) {
+        println!("Engine active and streaming transactions...");
+
+        loop {
+            match self
+                .redis
+                .fetch_next_delivery(INGESTION_STREAM, CONSUMER_GROUP, ENGINE_IDENTITY)
+                .await
+            {
+                Ok(Some((delivery_id, raw_json))) => {
+                    if let Ok(request) = serde_json::from_str::<OrderRequests>(&raw_json) {
+                        self.handle_order_request(request).await;
+                    }
+                    let _ = self
+                        .redis
+                        .acknowledge_processed(INGESTION_STREAM, CONSUMER_GROUP, &delivery_id)
+                        .await;
+                }
+                Ok(None) => {
+                    sleep(Duration::from_millis(1)).await;
+                }
+                Err(e) => {
+                    eprintln!("Stream extraction failuee: {:?}", e);
+                    sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
+    async fn handle_order_request(&mut self, request: OrderRequests) {
+        match request {
+            OrderRequests::CreateOrder(req) => {
+                let mut liability = Decimal::ZERO;
+                let mut insufficient_funds = false;
+
+                if req.order_type == OrderType::LIMIT {
+                    liability = req.price * req.quantity;
+                    let wallet = self.user_wallets.entry(req.user_id).or_insert(UserBalance {
+                        available_balance: Decimal::ZERO,
+                        locked_balance: Decimal::ZERO,
+                    });
+
+                    if wallet.available_balance < liability {
+                        insufficient_funds = true;
+                    } else {
+                        wallet.available_balance -= liability;
+                        wallet.locked_balance += liability;
                         println!(
-                            "  MATCHED: {} units @ ${} [Taker: {} <-> Maker: {}]",
-                            fill.quantity, fill.price, fill.taker_user_id, fill.maker_user_id
+                            "[BALANCE LOCK] User {}: Available = ${}, Locked = ${}",
+                            req.user_id, wallet.available_balance, wallet.locked_balance
                         );
                     }
                 }
-                Err(err) => eprintln!("[ENGINE ERROR] Transaciton processing failed: {}", err),
+
+                if insufficient_funds {
+                    println!(
+                        "[RISK REJECTION]: Insufficient available collateral for User {}. Required: ${}",
+                        req.user_id, liability
+                    );
+                    return;
+                }
+
+                let order_item = Order {
+                    user_id: req.user_id,
+                    order_id: req.order_id,
+                    price: req.price,
+                    quantity: req.quantity,
+                };
+
+                let mut match_result = None;
+                let mut depth_payload = String::new();
+
+                {
+                    if let Some(book) = self.orderbooks.get_mut(&req.market) {
+                        if let Ok(result) = book.process_order(order_item, req.side, req.order_type)
+                        {
+                            depth_payload =
+                                serde_json::to_string(&book.get_depth()).unwrap_or_default();
+                            match_result = Some(result);
+                        }
+                    }
+                }
+
+                if let Some(result) = match_result {
+                    self.settle_balances(&result.fills, req.side, req.order_type, liability);
+
+                    let execution_json = serde_json::to_string(&result).unwrap_or_default();
+                    let _ = self
+                        .redis
+                        .enqueue_persistence_log(PERSISTENCE_STREAM, &execution_json)
+                        .await;
+
+                    if !depth_payload.is_empty() {
+                        let _ = self
+                            .redis
+                            .publish_market_update(req.market, "depth", &depth_payload)
+                            .await;
+                    }
+
+                    for fill in &result.fills {
+                        let serialized_fill = serde_json::to_string(fill).unwrap_or_default();
+                        let _ = self
+                            .redis
+                            .publish_user_update(&fill.taker_user_id.to_string(), &serialized_fill)
+                            .await;
+                        let _ = self
+                            .redis
+                            .publish_user_update(&fill.maker_user_id.to_string(), &serialized_fill)
+                            .await;
+                    }
+                }
+
+                self.print_book_matrix(req.market);
             }
-        } else {
-            eprintln!("[ENGINE WARN] Dropped order targeting uninitiailzed market vactor");
+
+            OrderRequests::CancelOrder(req) => {
+                let mut canceled_order = None;
+
+                {
+                    if let Some(book) = self.orderbooks.get_mut(&req.market) {
+                        if let Ok(Some(order)) = book.cancel_order(req.order_id) {
+                            canceled_order = Some(order);
+                        }
+                    }
+                }
+
+                if let Some(order) = canceled_order {
+                    if let Some(wallet) = self.user_wallets.get_mut(&req.user_id) {
+                        let returned_capital = order.price * order.quantity;
+                        wallet.locked_balance -= returned_capital;
+                        wallet.available_balance += returned_capital;
+                        println!(
+                            "[BALANCE UNLOCK] Order {} Canceled. Capital Returned: ${}",
+                            req.order_id, returned_capital
+                        );
+                    }
+                } else {
+                    println!(
+                        "Order {} was not found active inside targeted book context",
+                        req.order_id
+                    );
+                }
+
+                self.print_book_matrix(req.market);
+            }
+        }
+    }
+
+    fn settle_balances(
+        &mut self,
+        fills: &[Fill],
+        taker_side: OrderSide,
+        taker_type: OrderType,
+        initial_liability: Decimal,
+    ) {
+        for fill in fills {
+            let matched_value = fill.price * fill.quantity;
+
+            // Settle Maker Balance (Makers always have funds locked inside a resting LIMIT order)
+            if let Some(maker_wallet) = self.user_wallets.get_mut(&fill.maker_user_id) {
+                maker_wallet.locked_balance -= matched_value;
+                // Add matched perp value adjustments to available capital
+                maker_wallet.available_balance += matched_value;
+            }
+
+            // Settle Taker Balance
+            if let Some(taker_wallet) = self.user_wallets.get_mut(&fill.taker_user_id) {
+                match taker_type {
+                    OrderType::LIMIT => {
+                        // Taker already locked funds based on initial liability limits.
+                        // Decrease locked balance and transfer value down to available capital.
+                        taker_wallet.locked_balance -= matched_value;
+                        taker_wallet.available_balance += matched_value;
+                    }
+                    OrderType::MARKET => {
+                        // Market orders don't lock funds in advance; settle directly from available capital
+                        taker_wallet.available_balance -= matched_value;
+                    }
+                }
+            }
         }
     }
 
     pub fn print_book_matrix(&self, market: Market) {
         if let Some(book) = self.orderbooks.get(&market) {
             println!("\n=================================================");
-            println!("📊 MARKET MATRIX DEPTH VIEW: {:?}", market);
+            println!("📊 ORDERBOOK L2 DEPTH SNAPSHOT: {:?}", market);
             println!("=================================================");
-
             println!("🔴 ASKS (SELL SIDE)");
-            if book.get_asks().is_empty() {
-                println!("   [ Empty Tree ]");
-            } else {
-                for (price, queue) in book.get_asks().iter().rev() {
-                    let aggregate_volume: Decimal = queue.iter().map(|o| o.quantity).sum();
-                    let order_count = queue.len();
-                    println!(
-                        "   Price: ${:<10} | Vol: {:<10} | Orders: {}",
-                        price, aggregate_volume, order_count
-                    );
-                }
+            for (price, queue) in book.get_asks().iter().rev() {
+                println!(
+                    "   Price: ${:<10} | Vol: {}",
+                    price,
+                    queue.iter().map(|o| o.quantity).sum::<Decimal>()
+                );
             }
-
             println!("-------------------------------------------------");
             println!("🟢 BIDS (BUY SIDE)");
-            if book.get_bids().is_empty() {
-                println!("   [ Empty Tree ]");
-            } else {
-                for (Reverse(price), queue) in book.get_bids().iter() {
-                    let aggregate_volume: Decimal = queue.iter().map(|o| o.quantity).sum();
-                    let order_count = queue.len();
-                    println!(
-                        "   Price: ${:<10} | Vol: {:<10} | Orders: {}",
-                        price, aggregate_volume, order_count
-                    );
-                }
+            for (Reverse(price), queue) in book.get_bids().iter() {
+                println!(
+                    "   Price: ${:<10} | Vol: {}",
+                    price,
+                    queue.iter().map(|o| o.quantity).sum::<Decimal>()
+                );
             }
             println!("=================================================\n");
         }
@@ -92,56 +278,10 @@ impl ExecuteEngine {
 
 #[tokio::main]
 async fn main() {
-    println!("Perpetual Matching Engine core running...");
-
-    let mut engine = ExecuteEngine::new();
-
-    let maker_1 = Uuid::new_v4();
-    let maker_2 = Uuid::new_v4();
-    let taker = Uuid::new_v4();
-
-    println!("\n--- Step 0: Printing Initial State ---");
-    engine.print_book_matrix(Market::SOL_PERP);
-
-    println!("--- Step 1: Placing resting Maker Limit Sell Order at $145.50 ---");
-    let limit_sell_1 = OrderPayload::new(
-        maker_1,
-        Market::SOL_PERP,
-        dec!(145.50),
-        dec!(10.0),
-        OrderSide::SELL,
-        OrderType::LIMIT,
-    );
-    engine.execute_transaction(limit_sell_1);
-
-    println!("\n--- Step 1 ---");
-    engine.print_book_matrix(Market::SOL_PERP);
-
-    println!("--- Step 2: Placing higher resting Maker Limit Sell Order at $146.00 ---");
-    let limit_sell_2 = OrderPayload::new(
-        maker_2,
-        Market::SOL_PERP,
-        dec!(146.00),
-        dec!(5.5),
-        OrderSide::SELL,
-        OrderType::LIMIT,
-    );
-    engine.execute_transaction(limit_sell_2);
-
-    println!("\n--- Step 2 ---");
-    engine.print_book_matrix(Market::SOL_PERP);
-
-    println!("--- Step 3: Ingesting Taker Market Buy Order for 12.0 Units ---");
-    let market_buy = OrderPayload::new(
-        taker,
-        Market::SOL_PERP,
-        dec!(0.0), // Market orders bypass limit boundaries
-        dec!(12.0),
-        OrderSide::BUY,
-        OrderType::MARKET,
-    );
-    engine.execute_transaction(market_buy);
-
-    println!("\n--- Step 3 ---");
-    engine.print_book_matrix(Market::SOL_PERP);
+    dotenvy::dotenv().ok();
+    let redis_manager = RedisManager::new()
+        .await
+        .expect("Failed to initialize engine message spine");
+    let mut engine = ExecuteEngine::new(redis_manager).await;
+    engine.start_polling_loop().await;
 }

@@ -85,6 +85,18 @@ impl RedisManager {
         Ok(())
     }
 
+    pub async fn enqueue_persistence_log(
+        &self,
+        stream: &str,
+        trade_payload: &str,
+    ) -> Result<(), Error> {
+        let _: String = self
+            .client
+            .xadd(stream, false, None, "*", ("trade_event", trade_payload))
+            .await?;
+        Ok(())
+    }
+
     pub async fn publish_market_update(
         &self,
         market: Market,

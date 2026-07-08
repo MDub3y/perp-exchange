@@ -1,43 +1,11 @@
+use chrono::Utc;
+use rust_decimal::Decimal;
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
 };
-
-use chrono::Utc;
-use rust_decimal::Decimal;
+pub use utils::{Fill, Market, Order, OrderBookDepth, OrderSide, OrderType, ProcessOrderResult};
 use uuid::Uuid;
-
-#[derive(Eq, Hash, PartialEq, Debug)]
-pub enum Market {
-    SOL_PERP,
-    BTC_PERP,
-    ETH_PERP,
-}
-
-pub enum OrderSide {
-    BUY,
-    SELL,
-}
-
-pub enum OrderType {
-    LIMIT,
-    MARKET,
-}
-
-pub enum OrderStatus {
-    Pending,
-    Filled,
-    PartiallyFilled,
-    Cancelled,
-}
-
-#[derive(Clone, Copy)]
-pub struct Order {
-    pub user_id: Uuid,
-    pub order_id: Uuid,
-    pub price: Decimal,
-    pub quantity: Decimal,
-}
 
 pub struct OrderPayload {
     pub market: Market,
@@ -74,25 +42,6 @@ impl OrderPayload {
     }
 }
 
-pub struct Fill {
-    pub price: Decimal,
-    pub quantity: Decimal,
-    pub taker_user_id: Uuid,
-    pub taker_order_id: Uuid,
-    pub maker_user_id: Uuid,
-    pub maker_order_id: Uuid,
-}
-
-pub struct ProcessOrderResult {
-    pub fills: Vec<Fill>,
-    pub executed_quantity: Decimal,
-}
-
-pub struct OrderBookDepth {
-    pub bids: Vec<(Decimal, Decimal)>,
-    pub asks: Vec<(Decimal, Decimal)>,
-}
-
 pub struct Orderbook {
     bids: BTreeMap<Reverse<Decimal>, VecDeque<Order>>,
     asks: BTreeMap<Decimal, VecDeque<Order>>,
@@ -115,24 +64,27 @@ impl Orderbook {
     pub fn get_bids(&self) -> &BTreeMap<Reverse<Decimal>, VecDeque<Order>> {
         &self.bids
     }
-
     pub fn get_asks(&self) -> &BTreeMap<Decimal, VecDeque<Order>> {
         &self.asks
     }
 
-    pub fn process_order(&mut self, payload: OrderPayload) -> Result<ProcessOrderResult, String> {
+    pub fn process_order(
+        &mut self,
+        payload: Order,
+        side: OrderSide,
+        order_type: OrderType,
+    ) -> Result<ProcessOrderResult, String> {
         let mut result = ProcessOrderResult {
             fills: Vec::new(),
             executed_quantity: Decimal::ZERO,
         };
 
-        let mut taker_order = payload.order;
+        let mut taker_order = payload;
 
-        match payload.order_type {
-            OrderType::LIMIT => match payload.order_side {
+        match order_type {
+            OrderType::LIMIT => match side {
                 OrderSide::BUY => {
                     self.match_against_asks(&mut taker_order, &mut result)?;
-
                     if taker_order.quantity > Decimal::ZERO {
                         self.order_price_map
                             .insert(taker_order.order_id, taker_order.price);
@@ -140,7 +92,6 @@ impl Orderbook {
                             .entry(taker_order.user_id)
                             .or_default()
                             .insert(taker_order.order_id);
-
                         self.bids
                             .entry(Reverse(taker_order.price))
                             .or_default()
@@ -149,7 +100,6 @@ impl Orderbook {
                 }
                 OrderSide::SELL => {
                     self.match_against_bids(&mut taker_order, &mut result)?;
-
                     if taker_order.quantity > Decimal::ZERO {
                         self.order_price_map
                             .insert(taker_order.order_id, taker_order.price);
@@ -157,7 +107,6 @@ impl Orderbook {
                             .entry(taker_order.user_id)
                             .or_default()
                             .insert(taker_order.order_id);
-
                         self.asks
                             .entry(taker_order.price)
                             .or_default()
@@ -165,7 +114,7 @@ impl Orderbook {
                     }
                 }
             },
-            OrderType::MARKET => match payload.order_side {
+            OrderType::MARKET => match side {
                 OrderSide::BUY => self.match_against_asks(&mut taker_order, &mut result)?,
                 OrderSide::SELL => self.match_against_bids(&mut taker_order, &mut result)?,
             },
@@ -180,8 +129,7 @@ impl Orderbook {
         result: &mut ProcessOrderResult,
     ) -> Result<(), String> {
         while taker_order.quantity > Decimal::ZERO && !self.asks.is_empty() {
-            let mut best_ask_price = *self.asks.keys().next().unwrap();
-
+            let best_ask_price = *self.asks.keys().next().unwrap();
             if taker_order.price < best_ask_price && taker_order.price != Decimal::ZERO {
                 break;
             }
@@ -208,9 +156,11 @@ impl Orderbook {
                         queue.push_front(maker_order);
                     } else {
                         self.order_price_map.remove(&maker_order.order_id);
+                        if let Some(set) = self.user_orders_map.get_mut(&maker_order.user_id) {
+                            set.remove(&maker_order.order_id);
+                        }
                     }
                 }
-
                 if queue.is_empty() {
                     self.asks.remove(&best_ask_price);
                 }
@@ -225,11 +175,9 @@ impl Orderbook {
         result: &mut ProcessOrderResult,
     ) -> Result<(), String> {
         while taker_order.quantity > Decimal::ZERO && !self.bids.is_empty() {
-            // Peek at the highest bid price level
             let best_bid_key = *self.bids.keys().next().unwrap();
             let best_bid_price = best_bid_key.0;
 
-            // Limit Order boundary protection: stop execution if bid price is lower than our sell limit
             if taker_order.price > best_bid_price && taker_order.price != Decimal::ZERO {
                 break;
             }
@@ -256,9 +204,11 @@ impl Orderbook {
                         queue.push_front(maker_order);
                     } else {
                         self.order_price_map.remove(&maker_order.order_id);
+                        if let Some(set) = self.user_orders_map.get_mut(&maker_order.user_id) {
+                            set.remove(&maker_order.order_id);
+                        }
                     }
                 }
-
                 if queue.is_empty() {
                     self.bids.remove(&best_bid_key);
                 }
@@ -272,133 +222,59 @@ impl Orderbook {
             bids: Vec::new(),
             asks: Vec::new(),
         };
-
         for (price_key, queue) in &self.bids {
-            let total_volume: Decimal = queue.iter().map(|o| o.quantity).sum();
-            depth.bids.push((price_key.0, total_volume));
+            depth
+                .bids
+                .push((price_key.0, queue.iter().map(|o| o.quantity).sum()));
         }
-
         for (price, queue) in &self.asks {
-            let total_volume: Decimal = queue.iter().map(|o| o.quantity).sum();
-            depth.asks.push((*price, total_volume));
+            depth
+                .asks
+                .push((*price, queue.iter().map(|o| o.quantity).sum()));
         }
-
         depth
     }
 
-    pub fn get_open_order(&self, order_id: Uuid) -> Option<Order> {
-        let price = self.order_price_map.get(&order_id)?;
-
-        if let Some(queue) = self.asks.get(price) {
-            if let Some(order) = queue.iter().find(|o| o.order_id == order_id) {
-                return Some(order.clone());
-            }
-        }
-
-        let bid_key = Reverse(*price);
-        if let Some(queue) = self.bids.get(&bid_key) {
-            if let Some(order) = queue.iter().find(|o| o.order_id == order_id) {
-                return Some(order.clone());
-            }
-        }
-
-        None
-    }
-
-    pub fn get_open_orders_for_user(&self, user_id: Uuid) -> Vec<Order> {
-        let mut user_orders = Vec::new();
-
-        if let Some(order_ids) = self.user_orders_map.get(&user_id) {
-            for order_id in order_ids {
-                if let Some(order) = self.get_open_order(*order_id) {
-                    user_orders.push(order);
-                }
-            }
-        }
-
-        user_orders
-    }
-
-    pub fn cancel_order(&mut self, order_id: Uuid) -> Result<bool, String> {
-        let price_val = match self.order_price_map.get(&order_id) {
-            Some(&p) => p,
-            None => return Ok(false),
+    pub fn cancel_order(&mut self, order_id: Uuid) -> Result<Option<Order>, String> {
+        let price_val = match self.order_price_map.remove(&order_id) {
+            Some(p) => p,
+            None => return Ok(None),
         };
 
         let mut removed_order = None;
-        let mut queue_is_empty = false;
-
-        {
-            if let Some(queue) = self.asks.get_mut(&price_val) {
+        if let Some(queue) = self.asks.get_mut(&price_val) {
+            if let Some(pos) = queue.iter().position(|o| o.order_id == order_id) {
+                removed_order = queue.remove(pos);
+            }
+        }
+        if removed_order.is_none() {
+            if let Some(queue) = self.bids.get_mut(&Reverse(price_val)) {
                 if let Some(pos) = queue.iter().position(|o| o.order_id == order_id) {
                     removed_order = queue.remove(pos);
-                    queue_is_empty = queue.is_empty();
                 }
             }
         }
 
         if let Some(order) = removed_order {
-            self.remove_order_from_indices(order.user_id, order_id);
-            if queue_is_empty {
+            if let Some(set) = self.user_orders_map.get_mut(&order.user_id) {
+                set.remove(&order_id);
+                if set.is_empty() {
+                    self.user_orders_map.remove(&order.user_id);
+                }
+            }
+            if self.asks.get(&price_val).map_or(false, |q| q.is_empty()) {
                 self.asks.remove(&price_val);
             }
-            return Ok(true);
-        }
-
-        let bid_key = Reverse(price_val);
-        {
-            if let Some(queue) = self.bids.get_mut(&bid_key) {
-                if let Some(pos) = queue.iter().position(|o| o.order_id == order_id) {
-                    removed_order = queue.remove(pos);
-                    queue_is_empty = queue.is_empty();
-                }
+            if self
+                .bids
+                .get(&Reverse(price_val))
+                .map_or(false, |q| q.is_empty())
+            {
+                self.bids.remove(&Reverse(price_val));
             }
+            return Ok(Some(order));
         }
 
-        if let Some(order) = removed_order {
-            self.remove_order_from_indices(order.user_id, order_id);
-            if queue_is_empty {
-                self.bids.remove(&bid_key);
-            }
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    pub fn cancel_all_orders_for_user(&mut self, user_id: Uuid) -> Result<Vec<Uuid>, String> {
-        let mut cancelled_ids = Vec::new();
-
-        if let Some(order_ids) = self.user_orders_map.get(&user_id) {
-            let ids_to_cancel: Vec<Uuid> = order_ids.iter().cloned().collect();
-
-            for id in ids_to_cancel {
-                if self.cancel_order(id)? {
-                    cancelled_ids.push(id);
-                }
-            }
-        }
-
-        self.user_orders_map.remove(&user_id);
-
-        Ok(cancelled_ids)
-    }
-
-    pub fn cancel_all_orders(&mut self) -> Result<(), String> {
-        self.bids.clear();
-        self.asks.clear();
-        self.order_price_map.clear();
-        self.user_orders_map.clear();
-        Ok(())
-    }
-
-    fn remove_order_from_indices(&mut self, user_id: Uuid, order_id: Uuid) {
-        self.order_price_map.remove(&order_id);
-        if let Some(set) = self.user_orders_map.get_mut(&user_id) {
-            set.remove(&order_id);
-            if set.is_empty() {
-                self.user_orders_map.remove(&user_id);
-            }
-        }
+        Ok(None)
     }
 }

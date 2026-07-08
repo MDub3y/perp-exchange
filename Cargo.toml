@@ -1,9 +1,10 @@
 [workspace]
 members = [
     "backend",
-    "engine",
+    "engine", "integration_tests",
     "redis",
     "utils",
+    "integration_tests"
 ]
 resolver = "2"
 

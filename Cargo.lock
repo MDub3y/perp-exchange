@@ -789,12 +789,14 @@ name = "engine"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dotenvy",
  "redis",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
  "serde_json",
  "tokio",
+ "utils",
  "uuid",
 ]
 
@@ -1377,6 +1379,10 @@ dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
 ]
+
+[[package]]
+name = "integration_tests"
+version = "0.1.0"
 
 [[package]]
 name = "itoa"

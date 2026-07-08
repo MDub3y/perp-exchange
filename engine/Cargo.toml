@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 redis = { path = "../redis"}
+utils = { path = "../utils"}
 tokio = {workspace = true}
 uuid = {workspace = true}
 chrono = {workspace = true}
@@ -12,3 +13,4 @@ serde = {workspace = true}
 rust_decimal_macros = {workspace = true}
 rust_decimal = {workspace = true}
 serde_json = {workspace = true}
+dotenvy ={ workspace = true}
