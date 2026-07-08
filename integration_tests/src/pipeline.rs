@@ -124,4 +124,64 @@ async fn test_end_to_end_pipeline_flow() {
         "Pub/Sub channel failed to broadcast updated depth matrices"
     );
     let depth = final_depth.unwrap();
+
+    println!("  [Live Pub/Sub Captured Depth] Asks: {:?}", depth.asks);
+    assert_eq!(depth.asks.len(), 1);
+    assert_eq!(depth.asks[0], (dec!(146.00), dec!(2.5)));
+    println!(
+        "Programmatic Assert Pass: Orderbook levels matched cleanly according to FIFO price priority."
+    );
+
+    println!("Verifying Persistence Log Stream entries...");
+
+    let persistence_data: Value = redis_manager
+        .client
+        .xread(Some(5), None, PERSISTENCE_STREAM, "0")
+        .await
+        .unwrap();
+
+    assert!(
+        !persistence_data.is_null(),
+        "Persistence stream logs are empty or failed to save updates"
+    );
+
+    let mut verified_persistence_matches = false;
+    if let Value::Array(streams) = persistence_data {
+        if let Some(Value::Array(stream_wrapper)) = streams.get(0) {
+            if let Some(Value::Array(entries)) = stream_wrapper.get(1) {
+                for entry in entries {
+                    if let Value::Array(entry_fields) = entry {
+                        if let Some(Value::Array(fields)) = entry_fields.get(1) {
+                            if let Some(raw_json) = fields.get(1).and_then(|v| v.as_string()) {
+                                if let Ok(result) =
+                                    serde_json::from_str::<ProcessOrderResult>(&raw_json)
+                                {
+                                    if result.executed_quantity == dec!(12.5) {
+                                        println!(
+                                            "  [Durable Stream Log Capture] Executed: {} units across {} fills",
+                                            result.executed_quantity,
+                                            result.fills.len()
+                                        );
+                                        assert_eq!(result.fills.len(), 2);
+                                        assert_eq!(result.fills[0].maker_order_id, order_id_a);
+                                        assert_eq!(result.fills[1].maker_order_id, order_id_b);
+                                        verified_persistence_matches = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            verified_persistence_matches,
+            "Matching execution entries not found in durability streams"
+        );
+        println!(
+            "Programmatic Assert Pass: Data backup pipelines are verified and running error-free!"
+        );
+        println!("\n[TEST SUMMARY: ALL LIFECYCLE CHANNELS VERIFIED GREEN]\n");
+    }
 }
