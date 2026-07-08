@@ -1384,7 +1384,9 @@ dependencies = [
 name = "integration_tests"
 version = "0.1.0"
 dependencies = [
+ "dotenvy",
  "engine",
+ "fred",
  "redis",
  "rust_decimal",
  "rust_decimal_macros",

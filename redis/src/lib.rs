@@ -51,7 +51,7 @@ impl RedisManager {
     ) -> Result<Option<(String, String)>, Error> {
         let response: Value = self
             .client
-            .xreadgroup(group, consumer, Some(1), None, false, ">", stream)
+            .xreadgroup(group, consumer, Some(1), None, false, stream, ">")
             .await?;
 
         if response.is_null() {
