@@ -262,9 +262,9 @@ impl ExecuteEngine {
     pub fn print_book_matrix(&self, market: Market) {
         if let Some(book) = self.orderbooks.get(&market) {
             println!("\n=================================================");
-            println!("📊 ORDERBOOK L2 DEPTH SNAPSHOT: {:?}", market);
+            println!("ORDERBOOK L2 DEPTH SNAPSHOT: {:?}", market);
             println!("=================================================");
-            println!("🔴 ASKS (SELL SIDE)");
+            println!("ASKS (SELL SIDE)");
             for (price, queue) in book.get_asks().iter().rev() {
                 println!(
                     "   Price: ${:<10} | Vol: {}",
@@ -273,7 +273,7 @@ impl ExecuteEngine {
                 );
             }
             println!("-------------------------------------------------");
-            println!("🟢 BIDS (BUY SIDE)");
+            println!("BIDS (BUY SIDE)");
             for (Reverse(price), queue) in book.get_bids().iter() {
                 println!(
                     "   Price: ${:<10} | Vol: {}",
