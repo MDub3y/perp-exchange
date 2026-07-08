@@ -3,3 +3,6 @@ mod orderbook;
 
 #[cfg(test)]
 mod redis;
+
+#[cfg(test)]
+mod pipeline;
