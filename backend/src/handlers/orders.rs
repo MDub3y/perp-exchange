@@ -4,12 +4,13 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use redis::{OrderRequests, RedisManager};
-use utils::{CancelOrder, CreateOrder, GetOpenOrders, Market, OrderSide};
+use utils::{CancelOrderArgs, CreateOrderArgs, GetOpenOrders, Market, OrderSide, OrderType};
 
 const INGESTION_STREAM: &str = "exchange:ingestion:stream";
 
 #[derive(Deserialize)]
 pub struct OrderInputPayload {
+    pub order_id: Uuid,
     pub market_id: String,
     pub side: String,
     pub order_type: String,
@@ -51,6 +52,12 @@ pub async fn create_order(
         _ => return HttpResponse::BadRequest().json("Execution side mapping must be BUY or SELL"),
     };
 
+    let order_type = match payload.order_type.to_uppercase().as_str() {
+        "LIMIT" => OrderType::LIMIT,
+        "MARKET" => OrderType::MARKET,
+        _ => return HttpResponse::BadRequest().json("Unsupported order type specification"),
+    };
+
     if payload.size <= Decimal::ZERO {
         return HttpResponse::BadRequest()
             .json("Order allocation quantity must be greater than zero");
@@ -71,11 +78,13 @@ pub async fn create_order(
         }
     };
 
-    let request = OrderRequests::CreateOrder(CreateOrder {
+    let request = OrderRequests::CreateOrder(CreateOrderArgs {
+        order_id: payload.order_id,
         market,
         price: execution_price,
         quantity: payload.size,
         side,
+        order_type,
         user_id,
         pubsub_id: Some(Uuid::new_v4()),
     });
@@ -115,7 +124,7 @@ pub async fn cancel_order(
         _ => return HttpResponse::BadRequest().json("Invalid execution side parameter"),
     };
 
-    let request = OrderRequests::CancelOrder(CancelOrder {
+    let request = OrderRequests::CancelOrder(CancelOrderArgs {
         order_id: order_uuid,
         user_id,
         price: payload.price,

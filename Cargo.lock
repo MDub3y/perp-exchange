@@ -1383,6 +1383,17 @@ dependencies = [
 [[package]]
 name = "integration_tests"
 version = "0.1.0"
+dependencies = [
+ "engine",
+ "redis",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "tokio",
+ "utils",
+ "uuid",
+]
 
 [[package]]
 name = "itoa"

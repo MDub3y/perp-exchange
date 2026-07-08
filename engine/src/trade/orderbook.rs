@@ -43,11 +43,11 @@ impl OrderPayload {
 }
 
 pub struct Orderbook {
-    bids: BTreeMap<Reverse<Decimal>, VecDeque<Order>>,
-    asks: BTreeMap<Decimal, VecDeque<Order>>,
-    order_price_map: HashMap<Uuid, Decimal>,
-    user_orders_map: HashMap<Uuid, HashSet<Uuid>>,
-    market: Market,
+    pub bids: BTreeMap<Reverse<Decimal>, VecDeque<Order>>,
+    pub asks: BTreeMap<Decimal, VecDeque<Order>>,
+    pub order_price_map: HashMap<Uuid, Decimal>,
+    pub user_orders_map: HashMap<Uuid, HashSet<Uuid>>,
+    pub market: Market,
 }
 
 impl Orderbook {
@@ -233,6 +233,28 @@ impl Orderbook {
                 .push((*price, queue.iter().map(|o| o.quantity).sum()));
         }
         depth
+    }
+
+    pub fn get_open_orders_for_user(&self, user_id: Uuid) -> Vec<Order> {
+        let mut user_orders = Vec::new();
+        if let Some(order_ids) = self.user_orders_map.get(&user_id) {
+            for order_id in order_ids {
+                if let Some(&price) = self.order_price_map.get(order_id) {
+                    if let Some(queue) = self.asks.get(&price) {
+                        if let Some(order) = queue.iter().find(|o| o.order_id == *order_id) {
+                            user_orders.push(*order);
+                            continue;
+                        }
+                    }
+                    if let Some(queue) = self.bids.get(&Reverse(price)) {
+                        if let Some(order) = queue.iter().find(|o| o.order_id == *order_id) {
+                            user_orders.push(*order);
+                        }
+                    }
+                }
+            }
+        }
+        user_orders
     }
 
     pub fn cancel_order(&mut self, order_id: Uuid) -> Result<Option<Order>, String> {

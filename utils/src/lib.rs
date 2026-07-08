@@ -109,8 +109,16 @@ pub struct CancelOrderArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetOpenOrders {
+    pub user_id: Uuid,
+    pub market: Market,
+    pub pubsub_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum OrderRequests {
     CreateOrder(CreateOrderArgs),
     CancelOrder(CancelOrderArgs),
+    GetOpenOrders(GetOpenOrders),
 }
