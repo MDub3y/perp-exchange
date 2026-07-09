@@ -68,6 +68,64 @@ impl Orderbook {
         &self.asks
     }
 
+    pub fn calculate_bid_impact(&self, target_notional: Decimal) -> Option<Decimal> {
+        let mut remaining_notional = target_notional;
+        let mut total_quantity = Decimal::ZERO;
+
+        for (Reverse(price), queue) in &self.bids {
+            for order in queue {
+                let level_notional = order.price * order.quantity;
+                if level_notional >= remaining_notional {
+                    let fractional_qty = remaining_notional / order.price;
+                    total_quantity += fractional_qty;
+                    remaining_notional = Decimal::ZERO;
+                    break;
+                } else {
+                    total_quantity += order.quantity;
+                    remaining_notional -= level_notional;
+                }
+            }
+            if remaining_notional.is_zero() {
+                break;
+            }
+        }
+
+        if remaining_notional.is_zero() && !total_quantity.is_zero() {
+            Some(target_notional / total_quantity)
+        } else {
+            None
+        }
+    }
+
+    pub fn calculate_ask_impact(&self, target_notional: Decimal) -> Option<Decimal> {
+        let mut remaining_notional = target_notional;
+        let mut total_quantity = Decimal::ZERO;
+
+        for (price, queue) in &self.asks {
+            for order in queue {
+                let level_notional = *price * order.quantity;
+                if level_notional >= remaining_notional {
+                    let fractional_qty = remaining_notional / *price;
+                    total_quantity += fractional_qty;
+                    remaining_notional = Decimal::ZERO;
+                    break;
+                } else {
+                    total_quantity += order.quantity;
+                    remaining_notional -= level_notional;
+                }
+            }
+            if remaining_notional.is_zero() {
+                break;
+            }
+        }
+
+        if remaining_notional.is_zero() && !total_quantity.is_zero() {
+            Some(target_notional / total_quantity)
+        } else {
+            None
+        }
+    }
+
     pub fn process_order(
         &mut self,
         payload: Order,
