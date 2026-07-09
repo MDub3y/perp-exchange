@@ -2,6 +2,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[allow(non_camel_case_types)]
 #[derive(Eq, Hash, PartialEq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Market {
     SOL_PERP,
@@ -85,6 +86,14 @@ pub struct OrderBookDepth {
     pub asks: Vec<(Decimal, Decimal)>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundingTelemetry {
+    pub market: Market,
+    pub index_price: Decimal,
+    pub premium_index: Decimal,
+    pub current_hourly_rate: Decimal,
+}
+
 // Inbound API Gateway Request Layouts
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateOrderArgs {
@@ -116,9 +125,16 @@ pub struct GetOpenOrders {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexPriceUpdate {
+    pub market: Market,
+    pub price: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum OrderRequests {
     CreateOrder(CreateOrderArgs),
     CancelOrder(CancelOrderArgs),
     GetOpenOrders(GetOpenOrders),
+    IndexUpdate(IndexPriceUpdate),
 }
