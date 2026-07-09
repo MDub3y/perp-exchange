@@ -1,4 +1,5 @@
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -9,7 +10,9 @@ pub mod trade;
 use trade::orderbook::Orderbook;
 
 use redis::RedisManager;
-use utils::{Fill, Market, Order, OrderRequests, OrderSide, OrderType, UserBalance};
+use utils::{
+    Fill, FundingTelemetry, Market, Order, OrderRequests, OrderSide, OrderType, UserBalance,
+};
 
 const INGESTION_STREAM: &str = "exchange:ingestion:stream";
 const PERSISTENCE_STREAM: &str = "exchange:persistence:stream";
@@ -19,15 +22,25 @@ const ENGINE_IDENTITY: &str = "matching_engine_primary_node";
 pub struct ExecuteEngine {
     pub orderbooks: HashMap<Market, Orderbook>,
     pub user_wallets: HashMap<Uuid, UserBalance>,
+    pub user_positions: HashMap<Uuid, HashMap<Market, Decimal>>,
+    pub index_prices: HashMap<Market, Decimal>,
+    pub premium_samples: HashMap<Market, Vec<Decimal>>,
+    pub current_funding_rates: HashMap<Market, Decimal>,
     pub redis: RedisManager,
 }
 
 impl ExecuteEngine {
     pub async fn new(redis: RedisManager) -> Self {
         let mut orderbooks = HashMap::new();
-        orderbooks.insert(Market::SOL_PERP, Orderbook::new(Market::SOL_PERP));
-        orderbooks.insert(Market::BTC_PERP, Orderbook::new(Market::BTC_PERP));
-        orderbooks.insert(Market::ETH_PERP, Orderbook::new(Market::ETH_PERP));
+        let mut index_prices = HashMap::new();
+        let mut premium_samples = HashMap::new();
+        let mut current_funding_rates = HashMap::new();
+
+        for &market in &[Market::SOL_PERP, Market::BTC_PERP, Market::ETH_PERP] {
+            orderbooks.insert(market, Orderbook::new(market));
+            premium_samples.insert(market, Vec::new());
+            current_funding_rates.insert(market, Decimal::ZERO);
+        }
 
         redis
             .setup_consumer_group(INGESTION_STREAM, CONSUMER_GROUP)
@@ -36,6 +49,10 @@ impl ExecuteEngine {
         let mut instance = Self {
             orderbooks,
             user_wallets: HashMap::new(),
+            user_positions: HashMap::new(),
+            index_prices,
+            premium_samples,
+            current_funding_rates,
             redis,
         };
 
@@ -66,6 +83,21 @@ impl ExecuteEngine {
     pub async fn start_polling_loop(&mut self) {
         println!("Engine active and streaming transactions...");
 
+        let premium_redis = self.redis.clone();
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_secs(5)).await;
+
+                let update_tick = OrderRequests::IndexUpdate(utils::IndexPriceUpdate {
+                    market: Market::SOL_PERP,
+                    price: Decimal::ZERO,
+                });
+                let _ = premium_redis
+                    .enqueue_request(INGESTION_STREAM, &update_tick)
+                    .await;
+            }
+        });
+
         loop {
             match self
                 .redis
@@ -94,6 +126,14 @@ impl ExecuteEngine {
 
     async fn handle_order_request(&mut self, request: OrderRequests) {
         match request {
+            OrderRequests::IndexUpdate(update) => {
+                if update.price.is_zero() {
+                    self.sample_premium_indices().await;
+                } else {
+                    self.index_prices.insert(update.market, update.price);
+                }
+            }
+
             OrderRequests::CreateOrder(req) => {
                 let mut liability = Decimal::ZERO;
                 let mut insufficient_funds = false;
@@ -224,6 +264,52 @@ impl ExecuteEngine {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    pub async fn sample_premium_indices(&mut self) {
+        let markets = [Market::SOL_PERP, Market::BTC_PERP, Market::ETH_PERP];
+        let impact_notional = dec!(1000.00);
+
+        for market in markets {
+            let index_price = *self.index_prices.get(&market).unwrap_or(&dec!(1.0));
+            let book = self.orderbooks.get(&market).unwrap();
+
+            let bid_impact = book
+                .calculate_bid_impact(impact_notional)
+                .unwrap_or(index_price);
+            let ask_impact = book
+                .calculate_ask_impact(impact_notional)
+                .unwrap_or(index_price);
+
+            // IPD = max(bid_impact - Index, 0) - max(Index - ask_impact, 0)
+            let term_1 = (bid_impact - index_price).max(Decimal::ZERO);
+            let term_2 = (index_price - ask_impact).max(Decimal::ZERO);
+            let ipd = term_1 - term_2;
+
+            let premium_index = ipd / index_price;
+
+            let samples = self.premium_samples.get_mut(&market).unwrap();
+            samples.push(premium_index);
+
+            if samples.len() >= 12 {
+                self.settle_hourly_funding_window(market).await;
+            } else {
+                let telemetry = FundingTelemetry {
+                    market,
+                    index_price,
+                    premium_index,
+                    current_hourly_rate: *self
+                        .current_funding_rates
+                        .get(&market)
+                        .unwrap_or(&Decimal::ZERO),
+                };
+                let telemetry_json = serde_json::to_string(&telemetry).unwrap_or_default();
+                let _ = self
+                    .redis
+                    .publish_market_update(market, "funding", &telemetry_json)
+                    .await;
             }
         }
     }
