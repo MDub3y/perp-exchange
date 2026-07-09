@@ -314,6 +314,52 @@ impl ExecuteEngine {
         }
     }
 
+    pub async fn settle_hourly_funding_window(&mut self, market: Market) {
+        let samples = self.premium_samples.get_mut(&market).unwrap();
+        if samples.is_empty() {
+            return;
+        }
+
+        let sum: Decimal = samples.iter().sum();
+        let mean_p = sum / Decimal::from(samples.len());
+        samples.clear();
+
+        let interest_leg = dec!(0.001);
+        let interest_deviation = interest_leg - mean_p;
+        let clamped_interest = interest_deviation.clamp(dec!(-0.005), dec!(0.005));
+
+        let f_8h = mean_p + clamped_interest;
+
+        let fr_hour = (f_8h / dec!(8.0)).clamp(dec!(-0.04), dec!(0.04));
+        self.current_funding_rates.insert(market, fr_hour);
+
+        println!(
+            "[FUNDING CALCULATOR] Market {:?} hourly rate locked at: {}%",
+            market,
+            fr_hour * dec!(100)
+        );
+
+        let index_price = *self.index_prices.get(&market).unwrap_or(&dec!(1.0));
+
+        for (user_id, positions) in &self.user_positions {
+            if let Some(&position_size) = positions.get(&market) {
+                if position_size.is_zero() {
+                    continue;
+                }
+
+                let funding_payment = position_size * fr_hour * index_price;
+
+                if let Some(wallet) = self.user_wallets.get_mut(user_id) {
+                    wallet.available_balance -= funding_payment;
+                    println!(
+                        "[FUNDING SETTLEMENT] Routed payment of ${} to/from User {}",
+                        funding_payment, user_id
+                    );
+                }
+            }
+        }
+    }
+
     fn settle_balances(
         &mut self,
         fills: &[Fill],
