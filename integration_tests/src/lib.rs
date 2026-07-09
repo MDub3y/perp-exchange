@@ -6,3 +6,6 @@ mod redis;
 
 #[cfg(test)]
 mod pipeline;
+
+#[cfg(test)]
+mod funding;
