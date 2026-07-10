@@ -1,5 +1,5 @@
 use rust_decimal_macros::dec;
-use std::{env, time::Duration};
+use std::{env, thread::sleep, time::Duration};
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -94,6 +94,9 @@ async fn test_engine_pubsub_broadcast_channels() {
 
     let target_channel = "market:BTC_PERP:depth";
     subscriber_client.subscribe(target_channel).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
     let mut message_stream = subscriber_client.message_rx();
 
     println!("[TEST] Emitting broadcast telemetry out-of-band via engine coordinator...");
