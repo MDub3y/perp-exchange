@@ -47,6 +47,14 @@ pub struct UserBalance {
     pub locked_balance: Decimal,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Position {
+    pub market: Market,
+    pub size: Decimal,
+    pub avg_entry_price: Decimal,
+    pub unrealized_pnl: Decimal,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Order {
     pub user_id: Uuid,
@@ -72,6 +80,7 @@ pub struct Fill {
     pub taker_order_id: Uuid,
     pub maker_user_id: Uuid,
     pub maker_order_id: Uuid,
+    pub market: Market,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,7 +103,15 @@ pub struct FundingTelemetry {
     pub current_hourly_rate: Decimal,
 }
 
-// Inbound API Gateway Request Layouts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkPriceTelemetry {
+    pub market: Market,
+    pub market_price: Decimal,
+    pub c1_smoothed: Decimal,
+    pub c2_local: Decimal,
+    pub c3_external: Decimal,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateOrderArgs {
     pub order_id: Uuid,
@@ -137,4 +154,6 @@ pub enum OrderRequests {
     CancelOrder(CancelOrderArgs),
     GetOpenOrders(GetOpenOrders),
     IndexUpdate(IndexPriceUpdate),
+    ExternalMarkUpdate { market: Market, price: Decimal },
+    MarkTick,
 }
