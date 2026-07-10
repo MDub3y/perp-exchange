@@ -324,9 +324,9 @@ impl ExecuteEngine {
         let mean_p = sum / Decimal::from(samples.len());
         samples.clear();
 
-        let interest_leg = dec!(0.001);
+        let interest_leg = dec!(0.0001);
         let interest_deviation = interest_leg - mean_p;
-        let clamped_interest = interest_deviation.clamp(dec!(-0.005), dec!(0.005));
+        let clamped_interest = interest_deviation.clamp(dec!(-0.0005), dec!(0.0005));
 
         let f_8h = mean_p + clamped_interest;
 
