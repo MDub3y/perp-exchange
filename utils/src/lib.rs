@@ -63,6 +63,7 @@ pub struct Position {
     pub liquidation_price: Decimal,
     pub avg_entry_price: Decimal,
     pub unrealized_pnl: Decimal,
+    pub leverage: Decimal,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -132,6 +133,7 @@ pub struct CreateOrderArgs {
     pub order_type: OrderType,
     pub user_id: Uuid,
     pub pubsub_id: Option<Uuid>,
+    pub leverage: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
