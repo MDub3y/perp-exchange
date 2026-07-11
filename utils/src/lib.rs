@@ -47,10 +47,20 @@ pub struct UserBalance {
     pub locked_balance: Decimal,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PositionSide {
+    Long,
+    Short,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Position {
     pub market: Market,
+    pub side: PositionSide,
     pub size: Decimal,
+    pub qty: Decimal,
+    pub margin: Decimal,
+    pub liquidation_price: Decimal,
     pub avg_entry_price: Decimal,
     pub unrealized_pnl: Decimal,
 }

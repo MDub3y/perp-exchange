@@ -6,7 +6,10 @@ use std::time::Duration;
 use tokio::time::sleep;
 use uuid::Uuid;
 
+pub mod engine;
 pub mod trade;
+
+use engine::ExecuteEngine;
 use trade::orderbook::Orderbook;
 
 use redis::RedisManager;
