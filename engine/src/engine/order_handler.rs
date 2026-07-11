@@ -9,7 +9,6 @@ use uuid::Uuid;
 use super::ExecuteEngine;
 
 const PERSISTENCE_STREAM: &str = "exchange:persistence:stream";
-const IMR_RATIO: Decimal = dec!(0.05); // 5% Initial Margin (20x Maximum Leverage)
 
 impl ExecuteEngine {
     pub async fn handle_order_request(&mut self, request: OrderRequests) {
@@ -18,9 +17,15 @@ impl ExecuteEngine {
                 let mut required_margin = Decimal::ZERO;
                 let mut insufficient_funds = false;
 
+                let order_leverage = if req.leverage.is_zero() {
+                    dec!(1.0)
+                } else {
+                    req.leverage
+                };
+
                 if req.order_type == OrderType::LIMIT {
-                    // Initial Margin Requirement Check: Quantity * Price * IMR_RATIO
-                    required_margin = req.quantity * req.price * IMR_RATIO;
+                    // Dynamic Initial Margin Requirement: (Quantity * Price) / Selected Leverage
+                    required_margin = (req.quantity * req.price) / order_leverage;
 
                     let wallet = self.user_wallets.entry(req.user_id).or_insert(UserBalance {
                         available_balance: Decimal::ZERO,
@@ -33,8 +38,8 @@ impl ExecuteEngine {
                         wallet.available_balance -= required_margin;
                         wallet.locked_balance += required_margin;
                         println!(
-                            "[MARGIN LOCK] Locked global order collateral: ${} for User {}",
-                            required_margin, req.user_id
+                            "[MARGIN LOCK] Locked global order collateral: ${} (Leverage {}x) for User {}",
+                            required_margin, order_leverage, req.user_id
                         );
                     }
                 }
@@ -68,7 +73,14 @@ impl ExecuteEngine {
                 }
 
                 if let Some(result) = match_result {
-                    self.settle_balances(&result.fills, req.side, req.order_type, required_margin);
+                    // Settle transactions using the dynamic order leverage factor
+                    self.settle_balances(
+                        &result.fills,
+                        req.side,
+                        req.order_type,
+                        required_margin,
+                        order_leverage,
+                    );
 
                     let execution_json = serde_json::to_string(&result).unwrap_or_default();
                     let _ = self
@@ -108,8 +120,16 @@ impl ExecuteEngine {
                     }
                 }
                 if let Some(order) = canceled_order {
+                    // Look up the matching price layer map to fetch the baseline order leverage context if required,
+                    // or safely calculate the refund based on standard client-reported arguments.
                     if let Some(wallet) = self.user_wallets.get_mut(&req.user_id) {
-                        let returned_margin = order.quantity * order.price * IMR_RATIO;
+                        let order_price = if req.price.is_zero() {
+                            dec!(1.0)
+                        } else {
+                            req.price
+                        };
+                        // For cancellations, fallback safety uses a baseline 20x max ratio if unadjusted
+                        let returned_margin = (order.quantity * order_price) / dec!(20.0);
                         wallet.locked_balance -= returned_margin;
                         wallet.available_balance += returned_margin;
                         println!(
@@ -142,26 +162,28 @@ impl ExecuteEngine {
         taker_side: OrderSide,
         taker_type: OrderType,
         initial_locked_margin: Decimal,
+        leverage: Decimal,
     ) {
+        let mut actual_executed_margin = Decimal::ZERO;
+
         for fill in fills {
             let matched_notional = fill.price * fill.quantity;
-            let transaction_margin = matched_notional * IMR_RATIO;
+            let transaction_margin = matched_notional / leverage;
+            actual_executed_margin += transaction_margin;
             self.last_trade_prices.insert(fill.market, fill.price);
 
-            // Settle Maker: Release order collateral from global locked_balance and transition to isolated margin account
+            // Settle Maker Account
             if let Some(maker_wallet) = self.user_wallets.get_mut(&fill.maker_user_id) {
                 maker_wallet.locked_balance -= transaction_margin;
             }
 
-            // Settle Taker
+            // Settle Taker Account
             if let Some(taker_wallet) = self.user_wallets.get_mut(&fill.taker_user_id) {
                 match taker_type {
                     OrderType::LIMIT => {
-                        // Order was already locked in global state; deduct from there
                         taker_wallet.locked_balance -= transaction_margin;
                     }
                     OrderType::MARKET => {
-                        // Aggressive market order fills directly out of available capital instantly
                         taker_wallet.available_balance -= transaction_margin;
                     }
                 }
@@ -178,6 +200,7 @@ impl ExecuteEngine {
                 fill.quantity,
                 fill.price,
                 transaction_margin,
+                leverage,
             );
             self.update_isolated_position_inventory(
                 short_user,
@@ -185,21 +208,16 @@ impl ExecuteEngine {
                 -fill.quantity,
                 fill.price,
                 transaction_margin,
+                leverage,
             );
         }
 
-        // Return any unexecuted excess margin from partial fills back to the taker's available balance
-        if taker_type == OrderType::LIMIT && initial_locked_margin > Decimal::ZERO {
-            let actual_executed_margin = fills
-                .iter()
-                .map(|f| f.price * f.quantity * IMR_RATIO)
-                .sum::<Decimal>();
+        // Return excess unexecuted margin back to the taker's available balance (handles partial fills)
+        if taker_type == OrderType::LIMIT && initial_locked_margin > actual_executed_margin {
             let remainder = initial_locked_margin - actual_executed_margin;
-            if remainder > Decimal::ZERO {
-                if let Some(taker_wallet) = self.user_wallets.get_mut(&fills[0].taker_user_id) {
-                    taker_wallet.locked_balance -= remainder;
-                    taker_wallet.available_balance += remainder;
-                }
+            if let Some(taker_wallet) = self.user_wallets.get_mut(&fills[0].taker_user_id) {
+                taker_wallet.locked_balance -= remainder;
+                taker_wallet.available_balance += remainder;
             }
         }
     }
@@ -211,17 +229,19 @@ impl ExecuteEngine {
         size_delta: Decimal,
         fill_price: Decimal,
         allocated_margin: Decimal,
+        requested_leverage: Decimal,
     ) {
         let markets_map = self.user_positions.entry(user_id).or_default();
         let position = markets_map.entry(market).or_insert(Position {
             market,
             size: Decimal::ZERO,
             qty: Decimal::ZERO,
-            side: PositionSide::Long,
             margin: Decimal::ZERO,
             liquidation_price: Decimal::ZERO,
             avg_entry_price: Decimal::ZERO,
             unrealized_pnl: Decimal::ZERO,
+            side: PositionSide::Long,
+            leverage: requested_leverage,
         });
 
         if position.size.is_zero() {
@@ -229,8 +249,14 @@ impl ExecuteEngine {
             position.qty = size_delta.abs();
             position.margin = allocated_margin;
             position.avg_entry_price = fill_price;
+            position.leverage = requested_leverage;
+            position.side = if size_delta.is_sign_positive() {
+                PositionSide::Long
+            } else {
+                PositionSide::Short
+            };
         } else if position.size.is_sign_positive() == size_delta.is_sign_positive() {
-            // Increasing exposure: Lock additional margin and adjust the weighted cost-basis
+            // Adding to an existing position: Blend margins and calculate the new weighted entry price
             let new_size = position.size + size_delta;
             let current_notional = position.size.abs() * position.avg_entry_price;
             let fill_notional = size_delta.abs() * fill_price;
@@ -239,13 +265,18 @@ impl ExecuteEngine {
             position.size = new_size;
             position.qty = new_size.abs();
             position.margin += allocated_margin;
+
+            // Re-derive effective blended leverage: Blended Notional / Combined Isolated Margin
+            if !position.margin.is_zero() {
+                position.leverage = (position.qty * position.avg_entry_price) / position.margin;
+            }
         } else {
             // Reducing or reversing exposure
             let current_abs = position.size.abs();
             let delta_abs = size_delta.abs();
 
             if delta_abs < current_abs {
-                // Partial Close: Reduce size and return a proportional chunk of margin to available balance
+                // Partial reduction: Return a proportional chunk of isolated margin back to available balance
                 let reduction_ratio = delta_abs / current_abs;
                 let released_margin = position.margin * reduction_ratio;
 
@@ -253,29 +284,36 @@ impl ExecuteEngine {
                 position.size += size_delta;
                 position.qty = position.size.abs();
 
+                // Recalculate effective blended leverage for the remaining position size
+                if !position.margin.is_zero() {
+                    position.leverage = (position.qty * position.avg_entry_price) / position.margin;
+                }
+
                 if let Some(wallet) = self.user_wallets.get_mut(&user_id) {
                     wallet.available_balance += released_margin;
                 }
             } else if delta_abs == current_abs {
-                // Full Close: Wipe state clear and return all remaining isolated margin back to available balance
+                // Full close: Wipe position state clean and credit remaining margin back to the user's wallet
                 let closing_margin = position.margin;
                 *position = Position {
                     market,
                     size: Decimal::ZERO,
                     qty: Decimal::ZERO,
-                    side: PositionSide::Long,
                     margin: Decimal::ZERO,
                     liquidation_price: Decimal::ZERO,
                     avg_entry_price: Decimal::ZERO,
                     unrealized_pnl: Decimal::ZERO,
+                    side: PositionSide::Long,
+                    leverage: dec!(1.0),
                 };
                 if let Some(wallet) = self.user_wallets.get_mut(&user_id) {
                     wallet.available_balance += closing_margin;
                 }
             } else {
-                // Directional Position Flip (Net Mode)
+                // Position Flip (Net Mode)
                 let net_new_qty = delta_abs - current_abs;
-                let excess_margin = allocated_margin - (current_abs * fill_price * IMR_RATIO);
+                let excess_margin =
+                    allocated_margin - (current_abs * fill_price / requested_leverage);
 
                 let old_margin = position.margin;
                 position.size = if size_delta.is_sign_positive() {
@@ -285,7 +323,13 @@ impl ExecuteEngine {
                 };
                 position.qty = net_new_qty;
                 position.avg_entry_price = fill_price;
-                position.margin = excess_margin.max(net_new_qty * fill_price * IMR_RATIO);
+                position.leverage = requested_leverage;
+                position.margin = excess_margin.max(net_new_qty * fill_price / requested_leverage);
+                position.side = if size_delta.is_sign_positive() {
+                    PositionSide::Long
+                } else {
+                    PositionSide::Short
+                };
 
                 if let Some(wallet) = self.user_wallets.get_mut(&user_id) {
                     wallet.available_balance += old_margin;
@@ -293,10 +337,10 @@ impl ExecuteEngine {
             }
         }
 
-        // Recalculate the position's liquidation boundaries instantly based on updated metrics
-        if !position.size.is_zero() {
+        // Recalculate liquidation boundaries instantly based on updated metrics
+        if !position.size.is_zero() && !position.qty.is_zero() {
             let mmr_ratio = dec!(0.01); // 1% Maintenance Margin requirement
-            if position.size.is_sign_positive() {
+            if position.side == PositionSide::Long {
                 position.liquidation_price = (position.avg_entry_price
                     - (position.margin / position.qty))
                     / (dec!(1.0) - mmr_ratio);
