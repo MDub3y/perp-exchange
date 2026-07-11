@@ -48,6 +48,7 @@ impl ExecuteEngine {
             {
                 Ok(Some((delivery_id, raw_json))) => {
                     if let Ok(request) = serde_json::from_str::<OrderRequests>(&raw_json) {
+                        // why is this async
                         self.handle_order_request(request).await;
                     }
                     let _ = self

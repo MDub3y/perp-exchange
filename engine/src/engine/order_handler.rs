@@ -7,7 +7,7 @@ use super::ExecuteEngine;
 const PERSISTENCE_STREAM: &str = "exchange:persistence:stream";
 
 impl ExecuteEngine {
-    async fn handle_order_request(&mut self, request: OrderRequests) {
+    pub async fn handle_order_request(&mut self, request: OrderRequests) {
         match request {
             OrderRequests::MarkTick => {
                 self.calculate_all_market_mark_prices().await;
