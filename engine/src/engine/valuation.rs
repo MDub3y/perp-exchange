@@ -1,8 +1,11 @@
 use rust_decimal::Decimal;
+use rust_decimal::prelude::Zero;
 use rust_decimal_macros::dec;
-use utils::{FundingTelemetry, MarkPriceTelemetry, Market, OrderRequests};
+use utils::{FundingTelemetry, MarkPriceTelemetry, Market, OrderRequests, Position};
 
 use super::ExecuteEngine;
+
+const MMR_RATIO: Decimal = dec!(0.01); // 1% Maintenance Margin Requirement
 
 impl ExecuteEngine {
     pub async fn execute_valuation_routines(&mut self, request: OrderRequests) {
@@ -20,7 +23,7 @@ impl ExecuteEngine {
                     self.index_prices.insert(update.market, update.price);
                 }
             }
-            _ => unreachable!("Handled cleanly by primary entry routes"),
+            _ => unreachable!(),
         }
     }
 
@@ -34,15 +37,13 @@ impl ExecuteEngine {
             let best_bid = book.peek_best_bid();
             let best_ask = book.peek_best_ask();
 
-            // Candidate 1: Smoothed Order Book Mid via 150-second EMA
+            // Candidate 1: Smoothed Order Book Mid
             let alpha = dec!(0.002663);
             let mut c1 = index;
-
             if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
                 let mid = (bid + ask) / dec!(2.0);
-                let diff = mid - index;
                 let prev_ema = self.c1_ema_state.entry(market).or_default();
-                *prev_ema = (alpha * diff) + ((dec!(1.0) - alpha) * (*prev_ema));
+                *prev_ema = (alpha * (mid - index)) + ((dec!(1.0) - alpha) * (*prev_ema));
                 c1 = index + *prev_ema;
             }
 
@@ -53,14 +54,16 @@ impl ExecuteEngine {
                 _ => index,
             };
 
-            // Candidate 3: External Feed Source
+            // Candidate 3: External Feed Target Price
             let c3 = *self.external_marks.get(&market).unwrap_or(&index);
 
             let raw_mark = self.median_of_three(c1, c2, c3);
             let final_mark = raw_mark.round_dp(4);
             self.mark_prices.insert(market, final_mark);
 
-            self.recalibrate_unrealized_pnl_matrix(market);
+            // Update PnL matrices and run real-time liquidation health checks
+            self.recalibrate_unrealized_pnl_and_check_liquidations(market)
+                .await;
 
             let telemetry = MarkPriceTelemetry {
                 market,
@@ -69,7 +72,6 @@ impl ExecuteEngine {
                 c2_local: c2,
                 c3_external: c3,
             };
-
             if let Ok(telemetry_json) = serde_json::to_string(&telemetry) {
                 let _ = self
                     .redis
@@ -79,17 +81,50 @@ impl ExecuteEngine {
         }
     }
 
-    fn recalibrate_unrealized_pnl_matrix(&mut self, market: Market) {
+    async fn recalibrate_unrealized_pnl_and_check_liquidations(&mut self, market: Market) {
         let mark_price = *self.mark_prices.get(&market).unwrap_or(&dec!(1.0));
+        let mut liquidated_users = Vec::new();
 
-        for positions_map in self.user_positions.values_mut() {
+        for (&user_id, positions_map) in self.user_positions.iter_mut() {
             if let Some(position) = positions_map.get_mut(&market) {
                 if position.size.is_zero() {
-                    position.unrealized_pnl = Decimal::ZERO;
-                } else {
-                    // size * (Mark - Entry)
-                    position.unrealized_pnl =
-                        position.size * (mark_price - position.avg_entry_price);
+                    continue;
+                }
+
+                // Live Unrealized PnL Calculation: size * (MarkPrice - EntryPrice)
+                position.unrealized_pnl = position.size * (mark_price - position.avg_entry_price);
+
+                // Isolated Position Equity Check: Margin + Unrealized PnL
+                let isolated_position_equity = position.margin + position.unrealized_pnl;
+                let maintenance_margin_requirement = position.qty * mark_price * MMR_RATIO;
+
+                if isolated_position_equity < maintenance_margin_requirement {
+                    liquidated_users.push(user_id);
+                }
+            }
+        }
+
+        // Process Liquidations: Evict insolvent positions from the engine's memory maps
+        for user_id in liquidated_users {
+            if let Some(positions_map) = self.user_positions.get_mut(&user_id) {
+                if let Some(abandoned_position) = positions_map.remove(&market) {
+                    println!(
+                        "🚨 [LIQUIDATION ENGINE] Position wiped for User {} on {:?} @ Mark ${}",
+                        user_id, market, mark_price
+                    );
+                    println!(
+                        "   Wiped Isolated Margin: ${} | Final Realized Loss: ${}",
+                        abandoned_position.margin, abandoned_position.unrealized_pnl
+                    );
+
+                    // Public liquidation broadcast over Redis channels
+                    let log_alert = serde_json::json!({
+                        "user_id": user_id, "market": market, "wiped_margin": abandoned_position.margin.to_string(), "execution_mark": mark_price.to_string()
+                    });
+                    let _ = self
+                        .redis
+                        .publish_market_update(market, "liquidations", &log_alert.to_string())
+                        .await;
                 }
             }
         }
@@ -169,26 +204,21 @@ impl ExecuteEngine {
         let fr_hour = (f_8h / dec!(8.0)).clamp(dec!(-0.04), dec!(0.04));
         self.current_funding_rates.insert(market, fr_hour);
 
-        println!(
-            "[FUNDING CALCULATOR] Market {:?} hourly rate locked at: {}%",
-            market,
-            fr_hour * dec!(100)
-        );
         let index_price = *self.index_prices.get(&market).unwrap_or(&dec!(1.0));
 
-        for (user_id, positions) in &self.user_positions {
-            if let Some(position) = positions.get(&market) {
+        // Funding payments apply directly to each position's isolated margin account
+        for (user_id, positions) in &mut self.user_positions {
+            if let Some(position) = positions.get_mut(&market) {
                 if position.size.is_zero() {
                     continue;
                 }
+
                 let funding_payment = position.size * fr_hour * index_price;
-                if let Some(wallet) = self.user_wallets.get_mut(user_id) {
-                    wallet.available_balance -= funding_payment;
-                    println!(
-                        "[FUNDING SETTLEMENT] Routed payment of ${} to/from User {}",
-                        funding_payment, user_id
-                    );
-                }
+                position.margin -= funding_payment;
+                println!(
+                    "💸 [ISOLATED FUNDING DEBIT] Subtracted ${} from User {}'s isolated margin balance container",
+                    funding_payment, user_id
+                );
             }
         }
     }
