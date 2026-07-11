@@ -68,6 +68,14 @@ impl Orderbook {
         &self.asks
     }
 
+    pub fn peek_best_bid(&self) -> Option<Decimal> {
+        self.bids.keys().next().map(|k| k.0)
+    }
+
+    pub fn peek_best_ask(&self) -> Option<Decimal> {
+        self.asks.keys().next().cloned()
+    }
+
     pub fn calculate_bid_impact(&self, target_notional: Decimal) -> Option<Decimal> {
         let mut remaining_notional = target_notional;
         let mut total_quantity = Decimal::ZERO;
@@ -208,6 +216,7 @@ impl Orderbook {
                         taker_user_id: taker_order.user_id,
                         maker_order_id: maker_order.order_id,
                         maker_user_id: maker_order.user_id,
+                        market: self.market,
                     });
 
                     if maker_order.quantity > Decimal::ZERO {
@@ -256,6 +265,7 @@ impl Orderbook {
                         taker_user_id: taker_order.user_id,
                         maker_order_id: maker_order.order_id,
                         maker_user_id: maker_order.user_id,
+                        market: self.market,
                     });
 
                     if maker_order.quantity > Decimal::ZERO {

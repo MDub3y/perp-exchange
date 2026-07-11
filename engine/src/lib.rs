@@ -11,7 +11,8 @@ use trade::orderbook::Orderbook;
 
 use redis::RedisManager;
 use utils::{
-    Fill, FundingTelemetry, Market, Order, OrderRequests, OrderSide, OrderType, UserBalance,
+    Fill, FundingTelemetry, MarkPriceTelemetry, Market, Order, OrderRequests, OrderSide, OrderType,
+    Position, UserBalance,
 };
 
 const INGESTION_STREAM: &str = "exchange:ingestion:stream";
@@ -22,8 +23,12 @@ const ENGINE_IDENTITY: &str = "matching_engine_primary_node";
 pub struct ExecuteEngine {
     pub orderbooks: HashMap<Market, Orderbook>,
     pub user_wallets: HashMap<Uuid, UserBalance>,
-    pub user_positions: HashMap<Uuid, HashMap<Market, Decimal>>,
+    pub user_positions: HashMap<Uuid, HashMap<Market, Position>>,
     pub index_prices: HashMap<Market, Decimal>,
+    pub external_marks: HashMap<Market, Decimal>,
+    pub last_trade_prices: HashMap<Market, Decimal>,
+    pub c1_ema_state: HashMap<Market, Decimal>,
+    pub mark_prices: HashMap<Market, Decimal>,
     pub premium_samples: HashMap<Market, Vec<Decimal>>,
     pub current_funding_rates: HashMap<Market, Decimal>,
     pub redis: RedisManager,
@@ -33,12 +38,22 @@ impl ExecuteEngine {
     pub async fn new(redis: RedisManager) -> Self {
         let mut orderbooks = HashMap::new();
         let mut index_prices = HashMap::new();
+        let mut external_marks = HashMap::new();
+        let mut last_trade_prices = HashMap::new();
+        let mut c1_ema_state = HashMap::new();
+        let mut mark_prices = HashMap::new();
         let mut premium_samples = HashMap::new();
         let mut current_funding_rates = HashMap::new();
 
         for &market in &[Market::SOL_PERP, Market::BTC_PERP, Market::ETH_PERP] {
             orderbooks.insert(market, Orderbook::new(market));
             premium_samples.insert(market, Vec::new());
+            current_funding_rates.insert(market, Decimal::ZERO);
+
+            c1_ema_state.insert(market, Decimal::ZERO);
+            index_prices.insert(market, dec!(145.00));
+            external_marks.insert(market, dec!(145.00));
+            last_trade_prices.insert(market, dec!(145.00));
             current_funding_rates.insert(market, Decimal::ZERO);
         }
 
@@ -51,6 +66,10 @@ impl ExecuteEngine {
             user_wallets: HashMap::new(),
             user_positions: HashMap::new(),
             index_prices,
+            external_marks,
+            last_trade_prices,
+            c1_ema_state,
+            mark_prices,
             premium_samples,
             current_funding_rates,
             redis,
@@ -126,6 +145,12 @@ impl ExecuteEngine {
 
     async fn handle_order_request(&mut self, request: OrderRequests) {
         match request {
+            OrderRequests::MarkTick => {
+                self.calculate_all_market_mark_prices().await;
+            }
+            OrderRequests::ExternalMarkUpdate { market, price } => {
+                self.external_marks.insert(market, price);
+            }
             OrderRequests::IndexUpdate(update) => {
                 if update.price.is_zero() {
                     self.sample_premium_indices().await;
@@ -268,6 +293,179 @@ impl ExecuteEngine {
         }
     }
 
+    pub async fn calculate_all_market_mark_prices(&mut self) {
+        let markets = [Market::SOL_PERP, Market::BTC_PERP, Market::ETH_PERP];
+
+        for market in markets {
+            let index = *self.index_prices.get(&market).unwrap_or(&dec!(1.0));
+            let book = self.orderbooks.get(&market).unwrap();
+
+            let best_bid = book.peek_best_bid();
+            let best_ask = book.peek_best_ask();
+
+            // Candidate 1: Smoothed Order Book Mid via 150-second EMA
+            let alpha = dec!(0.002663);
+            let mut c1 = index;
+
+            if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
+                let mid = (bid + ask) / dec!(2.0);
+                let diff = mid - index;
+                let prev_ema = self.c1_ema_state.entry(market).or_default();
+                *prev_ema = (alpha * diff) + ((dec!(1.0) - alpha) * (*prev_ema));
+                c1 = index + *prev_ema;
+            }
+
+            // Candidate 2: Local Market Activity Median
+            let last_trade = *self.last_trade_prices.get(&market).unwrap_or(&index);
+            let c2 = match (best_bid, best_ask) {
+                (Some(bid), Some(ask)) => self.median_of_three(bid, ask, last_trade),
+                _ => index,
+            };
+
+            // Candidate 3: Aggregated External Mark Feed
+            let c3 = *self.external_marks.get(&market).unwrap_or(&index);
+
+            let raw_mark = self.median_of_three(c1, c2, c3);
+            let final_mark = raw_mark.round_dp(4);
+            self.mark_prices.insert(market, final_mark);
+
+            self.recalibrate_unrealized_pnl_matrix(market);
+
+            let telemetry = MarkPriceTelemetry {
+                market,
+                market_price: final_mark,
+                c1_smoothed: c1,
+                c2_local: c2,
+                c3_external: c3,
+            };
+
+            if let Ok(telemetry_json) = serde_json::to_string(&telemetry) {
+                let _ = self
+                    .redis
+                    .publish_market_update(market, "mark_price", &telemetry_json)
+                    .await;
+            }
+        }
+    }
+
+    fn recalibrate_unrealized_pnl_matrix(&mut self, market: Market) {
+        let mark_price = *self.mark_prices.get(&market).unwrap_or(&dec!(1.0));
+
+        for positions_map in self.user_positions.values_mut() {
+            if let Some(position) = positions_map.get_mut(&market) {
+                if position.size.is_zero() {
+                    position.unrealized_pnl = Decimal::ZERO;
+                } else {
+                    position.unrealized_pnl =
+                        position.size * (mark_price - position.avg_entry_price);
+                }
+            }
+        }
+    }
+
+    fn median_of_three(&self, mut a: Decimal, mut b: Decimal, mut c: Decimal) -> Decimal {
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        if b > c {
+            std::mem::swap(&mut b, &mut c);
+        }
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        b
+    }
+
+    fn settle_balances(
+        &mut self,
+        fills: &[Fill],
+        taker_side: OrderSide,
+        taker_type: OrderType,
+        _initial_liability: Decimal,
+    ) {
+        for fill in fills {
+            let matched_value = fill.price * fill.quantity;
+            self.last_trade_prices.insert(fill.market, fill.price);
+
+            if let Some(maker_wallet) = self.user_wallets.get_mut(&fill.maker_user_id) {
+                maker_wallet.locked_balance -= matched_value;
+                maker_wallet.available_balance += matched_value;
+            }
+
+            if let Some(taker_wallet) = self.user_wallets.get_mut(&fill.taker_user_id) {
+                match taker_type {
+                    OrderType::LIMIT => {
+                        taker_wallet.locked_balance -= matched_value;
+                        taker_wallet.available_balance += matched_value;
+                    }
+                    OrderType::MARKET => {
+                        taker_wallet.available_balance -= matched_value;
+                    }
+                }
+            }
+
+            let (long_user, short_user) = match taker_side {
+                OrderSide::BUY => (fill.taker_user_id, fill.maker_user_id),
+                OrderSide::SELL => (fill.maker_user_id, fill.taker_user_id),
+            };
+
+            self.update_user_position_inventory(long_user, fill.market, fill.quantity, fill.price);
+            self.update_user_position_inventory(
+                short_user,
+                fill.market,
+                -fill.quantity,
+                fill.price,
+            );
+        }
+    }
+
+    fn update_user_position_inventory(
+        &mut self,
+        user_id: Uuid,
+        market: Market,
+        size_delta: Decimal,
+        fill_price: Decimal,
+    ) {
+        let markets_map = self.user_positions.entry(user_id).or_default();
+        let position = markets_map.entry(market).or_insert(Position {
+            market,
+            size: Decimal::ZERO,
+            avg_entry_price: Decimal::ZERO,
+            unrealized_pnl: Decimal::ZERO,
+        });
+
+        if position.size.is_zero() {
+            position.size = size_delta;
+            position.avg_entry_price = fill_price;
+        } else if position.size.is_sign_positive() == size_delta.is_sign_positive() {
+            let new_size = position.size + size_delta;
+            let current_notional = position.size.abs() * position.avg_entry_price;
+            let fill_notional = size_delta.abs() * fill_price;
+
+            position.avg_entry_price = (current_notional + fill_notional) / new_size.abs();
+            position.size = new_size;
+        } else {
+            let current_abs = position.size.abs();
+            let delta_abs = size_delta.abs();
+
+            if delta_abs < current_abs {
+                position.size += size_delta;
+            } else if delta_abs == current_abs {
+                position.size = Decimal::ZERO;
+                position.avg_entry_price = Decimal::ZERO;
+                position.unrealized_pnl = Decimal::ZERO;
+            } else {
+                let remaining_qty = delta_abs - current_abs;
+                position.size = if size_delta.is_sign_positive() {
+                    remaining_qty
+                } else {
+                    -remaining_qty
+                };
+                position.avg_entry_price = fill_price;
+            }
+        }
+    }
+
     pub async fn sample_premium_indices(&mut self) {
         let markets = [Market::SOL_PERP, Market::BTC_PERP, Market::ETH_PERP];
         let impact_notional = dec!(1000.00);
@@ -343,11 +541,11 @@ impl ExecuteEngine {
 
         for (user_id, positions) in &self.user_positions {
             if let Some(&position_size) = positions.get(&market) {
-                if position_size.is_zero() {
+                if position_size.size.is_zero() {
                     continue;
                 }
 
-                let funding_payment = position_size * fr_hour * index_price;
+                let funding_payment = position_size.size * fr_hour * index_price;
 
                 if let Some(wallet) = self.user_wallets.get_mut(user_id) {
                     wallet.available_balance -= funding_payment;
@@ -355,35 +553,6 @@ impl ExecuteEngine {
                         "[FUNDING SETTLEMENT] Routed payment of ${} to/from User {}",
                         funding_payment, user_id
                     );
-                }
-            }
-        }
-    }
-
-    fn settle_balances(
-        &mut self,
-        fills: &[Fill],
-        taker_side: OrderSide,
-        taker_type: OrderType,
-        initial_liability: Decimal,
-    ) {
-        for fill in fills {
-            let matched_value = fill.price * fill.quantity;
-
-            if let Some(maker_wallet) = self.user_wallets.get_mut(&fill.maker_user_id) {
-                maker_wallet.locked_balance -= matched_value;
-                maker_wallet.available_balance += matched_value;
-            }
-
-            if let Some(taker_wallet) = self.user_wallets.get_mut(&fill.taker_user_id) {
-                match taker_type {
-                    OrderType::LIMIT => {
-                        taker_wallet.locked_balance -= matched_value;
-                        taker_wallet.available_balance += matched_value;
-                    }
-                    OrderType::MARKET => {
-                        taker_wallet.available_balance -= matched_value;
-                    }
                 }
             }
         }
