@@ -62,7 +62,7 @@ async fn test_end_to_end_pipeline_flow() {
         order_type: OrderType::LIMIT,
         user_id: user_maker,
         pubsub_id: Some(Uuid::new_v4()),
-        leverage: dec!(10.0), // Fixed: Added required leverage field parameter
+        leverage: dec!(10.0),
     });
 
     let order_id_b = Uuid::new_v4();
@@ -75,7 +75,7 @@ async fn test_end_to_end_pipeline_flow() {
         order_type: OrderType::LIMIT,
         user_id: user_maker,
         pubsub_id: Some(Uuid::new_v4()),
-        leverage: dec!(10.0), // Fixed: Added required leverage field parameter
+        leverage: dec!(10.0),
     });
 
     redis_manager
