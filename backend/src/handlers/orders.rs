@@ -16,6 +16,7 @@ pub struct OrderInputPayload {
     pub order_type: String,
     pub price: Decimal,
     pub size: Decimal,
+    pub leverage: Decimal,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +88,7 @@ pub async fn create_order(
         order_type,
         user_id,
         pubsub_id: Some(Uuid::new_v4()),
+        leverage: payload.leverage,
     });
 
     match redis.enqueue_request(INGESTION_STREAM, &request).await {
