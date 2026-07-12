@@ -9,3 +9,6 @@ mod pipeline;
 
 #[cfg(test)]
 mod funding;
+
+#[cfg(test)]
+mod leverage;

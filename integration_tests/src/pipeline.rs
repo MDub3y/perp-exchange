@@ -18,8 +18,8 @@ const PERSISTENCE_STREAM: &str = "exchange:persistence:stream";
 
 #[tokio::test]
 async fn test_end_to_end_pipeline_flow() {
-    dotenvy::from_filename("../.env").unwrap();
-    let redis_url = env::var("REDIS_URL").unwrap();
+    dotenvy::from_filename("../.env").ok();
+    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
     let redis_manager = RedisManager::new()
         .await
@@ -62,6 +62,7 @@ async fn test_end_to_end_pipeline_flow() {
         order_type: OrderType::LIMIT,
         user_id: user_maker,
         pubsub_id: Some(Uuid::new_v4()),
+        leverage: dec!(10.0), // Fixed: Added required leverage field parameter
     });
 
     let order_id_b = Uuid::new_v4();
@@ -74,6 +75,7 @@ async fn test_end_to_end_pipeline_flow() {
         order_type: OrderType::LIMIT,
         user_id: user_maker,
         pubsub_id: Some(Uuid::new_v4()),
+        leverage: dec!(10.0), // Fixed: Added required leverage field parameter
     });
 
     redis_manager
@@ -99,6 +101,7 @@ async fn test_end_to_end_pipeline_flow() {
         order_type: OrderType::MARKET,
         user_id: user_taker,
         pubsub_id: Some(Uuid::new_v4()),
+        leverage: dec!(10.0), // Fixed: Added required leverage field parameter
     });
 
     redis_manager

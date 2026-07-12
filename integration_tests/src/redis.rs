@@ -1,11 +1,11 @@
 use rust_decimal_macros::dec;
-use std::{env, thread::sleep, time::Duration};
+use std::{env, time::Duration};
 use tokio::time::timeout;
 use uuid::Uuid;
 
 use fred::prelude::*;
 use redis::RedisManager;
-use utils::{CreateOrderArgs, Market, OrderRequests, OrderType};
+use utils::{CreateOrderArgs, Market, OrderRequests, OrderSide, OrderType};
 
 const TEST_INGESTION_STREAM: &str = "test:exchange:ingestion:stream";
 const TEST_CONSUMER_GROUP: &str = "test:engine:matching:group";
@@ -14,7 +14,7 @@ const TEST_ENGINE_IDENTITY: &str = "test_matching_engine_worker_node";
 #[tokio::test]
 async fn test_redis_stream_ingress_egress_and_acknowledgemant() {
     dotenvy::dotenv().ok();
-    let _redis_url = env::var("REDIS_URL").unwrap();
+    let _redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let redis_manager = RedisManager::new()
         .await
         .expect("Redis test network cluster unreachable");
@@ -31,12 +31,13 @@ async fn test_redis_stream_ingress_egress_and_acknowledgemant() {
     let inbound_request = OrderRequests::CreateOrder(CreateOrderArgs {
         order_id: client_order_id,
         user_id: client_user_id,
-        market: utils::Market::ETH_PERP,
+        market: Market::ETH_PERP,
         price: dec!(2600.00),
         quantity: dec!(1.5),
-        side: utils::OrderSide::BUY,
+        side: OrderSide::BUY,
         order_type: OrderType::LIMIT,
         pubsub_id: Some(Uuid::new_v4()),
+        leverage: dec!(10.0), // Fixed: Added required leverage parameter
     });
 
     println!("[TEST] Enqueuing verified payload into append-only log stream");
@@ -83,7 +84,7 @@ async fn test_redis_stream_ingress_egress_and_acknowledgemant() {
 #[tokio::test]
 async fn test_engine_pubsub_broadcast_channels() {
     dotenvy::dotenv().ok();
-    let _redis_url = env::var("REDIS_URL").unwrap();
+    let _redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let redis_manager = RedisManager::new()
         .await
         .expect("Redis infrastructure link broken");
