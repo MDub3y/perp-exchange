@@ -213,7 +213,10 @@ impl ExecuteEngine {
         }
 
         // Return excess unexecuted margin back to the taker's available balance (handles partial fills)
-        if taker_type == OrderType::LIMIT && initial_locked_margin > actual_executed_margin {
+        if taker_type == OrderType::LIMIT
+            && initial_locked_margin > actual_executed_margin
+            && !fills.is_empty()
+        {
             let remainder = initial_locked_margin - actual_executed_margin;
             if let Some(taker_wallet) = self.user_wallets.get_mut(&fills[0].taker_user_id) {
                 taker_wallet.locked_balance -= remainder;

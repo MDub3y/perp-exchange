@@ -12,3 +12,6 @@ mod funding;
 
 #[cfg(test)]
 mod leverage;
+
+#[cfg(test)]
+mod lifecycle;
