@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-l0: #0b0e11;
+    --bg-l1: #121418;
+    --bg-l2: #16191e;
+    --bg-l3: #1c1e22;
+    --bg-l4: #282b30;
+    
+    --text-high: #f4f4f6;
+    --text-med: #9b9fae;
+    --text-low: #5d606f;
+    
+    --mint-foam: #00c278;
+    --soft-red: #fd4b4e;
+    --accent-blue: #0284c7;
+    --yellow-text: #eab308;
+    
+    --card-border: #1c1e22;
+  }
+}
+
+body {
+  background-color: var(--bg-l0);
+  color: var(--text-high);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Glassmorphism Aceternity Custom Utility Shadow */
+.shadow-aceternity {
+  box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.4), 0px 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
